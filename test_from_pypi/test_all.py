@@ -1,7 +1,41 @@
-"""test_all.py — rx_rust 完整 API 测试（共 98+ 个对象）。"""
+"""test_all.py — rx_rust 完整 API 测试（共 98+ 个对象）。
+
+运行方式：
+    1) 已 pip install rx-rust   → python test_all.py
+    2) 未安装（本仓库开发态）   → python test_all.py
+                               （脚本会自动从 ../rx-rust-py/python 导入纯 Python 实现）
+"""
 from __future__ import annotations
+import os
 import sys
+from pathlib import Path
 from typing import List
+
+# ---------- 智能导入 rx_rust ----------
+# 优先使用已安装的 rx-rust；若不可用，则从本仓库的 python/ 目录加载纯 Python 实现
+try:
+    import rx_rust as _rx  # noqa: F401
+    _SOURCE = "installed"
+except ModuleNotFoundError:
+    _HERE = Path(__file__).resolve().parent
+    _CANDIDATES = [
+        _HERE.parent / "rx-rust-py" / "python",
+        _HERE.parent / "rxpy" / "python",
+        _HERE.parent / "rx-rust-python",
+    ]
+    for _p in _CANDIDATES:
+        if _p.exists() and (_p / "rx_rust").exists():
+            sys.path.insert(0, str(_p))
+            break
+    import rx_rust as _rx  # noqa: F401
+    _SOURCE = "source"
+except Exception as _e:  # pragma: no cover
+    raise RuntimeError(
+        "既找不到已安装的 rx_rust 包，也无法定位本仓库内的源码目录。"
+        f" 请先用 `pip install rx-rust` 或在仓库根目录的子目录运行。"
+    ) from _e
+
+print(f"[i] rx_rust 模块来源: {'PyPI 已安装包' if _SOURCE == 'installed' else '本仓库源码（纯 Python 实现）'}")
 
 # ---------- Helper ----------
 _PASS = 0
