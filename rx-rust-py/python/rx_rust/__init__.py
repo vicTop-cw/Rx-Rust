@@ -39,6 +39,7 @@ Rx-Rust 是一个用于组合异步和基于事件的程序的 Python 库，灵�
 from __future__ import annotations
 
 import time
+import threading as _threading
 from typing import Any, Callable, Iterable, List, Optional
 
 # ============================================================================
@@ -147,13 +148,26 @@ class Subscription:
 class _PyObservable:
     """纯 Python 版 Observable。"""
 
-    def __init__(self, subscribe_fn: Callable[[Callable[[Any], None]], Subscription]):
+    def __init__(self, subscribe_fn: Callable[[Callable[[Any], None]], Subscription],
+                 ops=None):
         self._subscribe = subscribe_fn
+        self._ops = ops or []  # 延迟操作链
+
+    # ---------- 操作链管理 ----------
+    def _add_op(self, op_type, *args, **kwargs):
+        """添加一个操作到链中，返回新的 _PyObservable（不立即创建订阅包装）。"""
+        new_ops = self._ops + [(op_type, args, kwargs)]
+        return _PyObservable(self._subscribe, new_ops)
 
     @staticmethod
-    def of(value):
+    def of(*values):
+        if len(values) == 0:
+            raise TypeError("of() requires at least 1 argument")
+        vals = list(values)
+
         def _sub(observer):
-            observer(value)
+            for v in vals:
+                observer(v)
             return Subscription()
         return _PyObservable(_sub)
 
@@ -200,68 +214,124 @@ class _PyObservable:
             return Subscription()
         return _PyObservable(_sub)
 
-    def subscribe(self, on_next):
-        return self._subscribe(on_next)
+    def subscribe(self, on_next, on_error=None, on_completed=None):
+        """订阅，自动构建操作链并处理错误。"""
+        if self._ops:
+            def build_observer(ops, final_observer, _on_error):
+                if not ops:
+                    return final_observer
+                op_type, args, kwargs = ops[0]
+                rest = ops[1:]
+                # 递归构建下一层 observer（只构建一次），避免计数器被重置
+                next_observer = build_observer(rest, final_observer, _on_error)
 
-    # ---------- 转换操作符 ----------
+                if op_type == 'map':
+                    mapper = args[0]
+
+                    def wrapped(value):
+                        try:
+                            result = mapper(value)
+                            next_observer(result)
+                        except Exception as e:
+                            if _on_error:
+                                _on_error(e)
+                            else:
+                                raise
+
+                    return wrapped
+                elif op_type == 'filter':
+                    predicate = args[0]
+
+                    def wrapped(value):
+                        try:
+                            if predicate(value):
+                                next_observer(value)
+                        except Exception as e:
+                            if _on_error:
+                                _on_error(e)
+                            else:
+                                raise
+
+                    return wrapped
+                elif op_type == 'take':
+                    n = args[0]
+                    taken = [0]
+
+                    def wrapped(value):
+                        if taken[0] < n:
+                            taken[0] += 1
+                            next_observer(value)
+
+                    return wrapped
+                elif op_type == 'skip':
+                    n = args[0]
+                    skipped = [0]
+
+                    def wrapped(value):
+                        if skipped[0] < n:
+                            skipped[0] += 1
+                            return
+                        next_observer(value)
+
+                    return wrapped
+                elif op_type == 'first':
+                    taken = [0]
+
+                    def wrapped(value):
+                        if taken[0] < 1:
+                            taken[0] += 1
+                            next_observer(value)
+
+                    return wrapped
+                elif op_type == 'do_on_next':
+                    action = args[0]
+
+                    def wrapped(value):
+                        try:
+                            action(value)
+                        except Exception as e:
+                            if _on_error:
+                                _on_error(e)
+                        next_observer(value)
+
+                    return wrapped
+                # 未知操作类型 — 传递给下一个 observer
+                return final_observer
+
+            observer = build_observer(self._ops, on_next, on_error)
+            return self._subscribe(observer)
+        else:
+            return self._subscribe(on_next)
+
+    # ---------- pipe ----------
+    def pipe(self, *operators):
+        """管道操作符，每个 operator 是 (Observable) -> Observable 的函数。"""
+        result = self
+        for op in operators:
+            result = op(result)
+        return result
+
+    # ---------- 转换操作符（_add_op 延迟构建） ----------
     def map(self, mapper):
-        source_subscribe = self._subscribe
-
-        def _sub(observer):
-            def wrapped(value):
-                try:
-                    observer(mapper(value))
-                except Exception:
-                    pass
-            return source_subscribe(wrapped)
-        return _PyObservable(_sub)
+        return self._add_op('map', mapper)
 
     def filter(self, predicate):
-        source_subscribe = self._subscribe
+        return self._add_op('filter', predicate)
 
-        def _sub(observer):
-            def wrapped(value):
-                if predicate(value):
-                    observer(value)
-            return source_subscribe(wrapped)
-        return _PyObservable(_sub)
-
-    # ---------- 过滤操作符 ----------
+    # ---------- 过滤操作符（_add_op 延迟构建） ----------
     def take(self, n):
-        n = int(n)
-        source_subscribe = self._subscribe
-
-        def _sub(observer):
-            taken = [0]
-
-            def wrapped(value):
-                if taken[0] < n:
-                    taken[0] += 1
-                    observer(value)
-            return source_subscribe(wrapped)
-        return _PyObservable(_sub)
+        return self._add_op('take', int(n))
 
     def skip(self, n):
-        n = int(n)
-        source_subscribe = self._subscribe
-
-        def _sub(observer):
-            skipped = [0]
-
-            def wrapped(value):
-                if skipped[0] < n:
-                    skipped[0] += 1
-                    return
-                observer(value)
-            return source_subscribe(wrapped)
-        return _PyObservable(_sub)
+        return self._add_op('skip', int(n))
 
     def first(self):
-        return self.take(1)
+        return self._add_op('first')
+
+    def do_on_next(self, action):
+        return self._add_op('do_on_next', action)
 
     def last(self):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             last_value = [None]
             have_value = [False]
@@ -269,7 +339,7 @@ class _PyObservable:
             def wrapped(value):
                 last_value[0] = value
                 have_value[0] = True
-            source_subscribe(wrapped)
+            self.subscribe(wrapped)
             if have_value[0]:
                 observer(last_value[0])
             return Subscription()
@@ -277,21 +347,17 @@ class _PyObservable:
 
     # ---------- 聚合操作符 ----------
     def count(self):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             counter = [0]
 
             def wrapped(value):
                 counter[0] += 1
-            source_subscribe(wrapped)
+            self.subscribe(wrapped)
             observer(counter[0])
             return Subscription()
         return _PyObservable(_sub)
 
     def sum(self):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             total = [0]
             has_value = [False]
@@ -299,42 +365,44 @@ class _PyObservable:
             def wrapped(value):
                 total[0] = total[0] + value
                 has_value[0] = True
-            source_subscribe(wrapped)
+            self.subscribe(wrapped)
             observer(total[0])
             return Subscription()
 
         return _PyObservable(_sub)
 
     def reduce(self, initial, reducer):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             acc = [initial]
 
             def wrapped(value):
-                acc[0] = reducer(acc[0], value)
-            source_subscribe(wrapped)
+                try:
+                    acc[0] = reducer(acc[0], value)
+                except Exception:
+                    raise
+
+            self.subscribe(wrapped)
             observer(acc[0])
             return Subscription()
         return _PyObservable(_sub)
 
     def scan(self, initial, scanner):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             acc = [initial]
             observer(acc[0])
 
             def wrapped(value):
-                acc[0] = scanner(acc[0], value)
+                try:
+                    acc[0] = scanner(acc[0], value)
+                except Exception:
+                    raise
                 observer(acc[0])
-            source_subscribe(wrapped)
+
+            self.subscribe(wrapped)
             return Subscription()
         return _PyObservable(_sub)
 
     def flat_map(self, mapper):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             def wrapped(value):
                 inner = mapper(value)
@@ -349,36 +417,30 @@ class _PyObservable:
                             observer(item)
                     except TypeError:
                         observer(inner)
-            return source_subscribe(wrapped)
+            return self.subscribe(wrapped)
         return _PyObservable(_sub)
 
     def start_with(self, *values):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             for v in values:
                 observer(v)
-            return source_subscribe(observer)
+            return self.subscribe(observer)
         return _PyObservable(_sub)
 
     def default_if_empty(self, default):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             emitted = [False]
 
             def wrapped(value):
                 emitted[0] = True
                 observer(value)
-            source_subscribe(wrapped)
+            self.subscribe(wrapped)
             if not emitted[0]:
                 observer(default)
             return Subscription()
         return _PyObservable(_sub)
 
     def contains(self, target):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             found = [False]
 
@@ -386,38 +448,29 @@ class _PyObservable:
                 if not found[0]:
                     if value == target:
                         found[0] = True
-            source_subscribe(wrapped)
+            self.subscribe(wrapped)
             observer(found[0])
             return Subscription()
         return _PyObservable(_sub)
 
     def all(self, predicate):
-        source_subscribe = self._subscribe
-
         def _sub(observer):
             all_pass = [True]
 
             def wrapped(value):
                 if all_pass[0]:
-                    if not predicate(value):
-                        all_pass[0] = False
-            source_subscribe(wrapped)
+                    try:
+                        if not predicate(value):
+                            all_pass[0] = False
+                    except Exception:
+                        raise
+
+            self.subscribe(wrapped)
             observer(all_pass[0])
             return Subscription()
         return _PyObservable(_sub)
 
-    def do_on_next(self, action):
-        source_subscribe = self._subscribe
-
-        def _sub(observer):
-            def wrapped(value):
-                action(value)
-                observer(value)
-            return source_subscribe(wrapped)
-        return _PyObservable(_sub)
-
     def merge(self, other):
-        source_subscribe = self._subscribe
         other_inner = getattr(other, "_inner", None)
         if other_inner is None and hasattr(other, "_subscribe"):
             other_subscribe = other._subscribe
@@ -429,7 +482,7 @@ class _PyObservable:
                 return Subscription()
 
         def _sub(observer):
-            source_subscribe(observer)
+            self.subscribe(observer)
             other_subscribe(observer)
             return Subscription()
         return _PyObservable(_sub)
@@ -437,17 +490,97 @@ class _PyObservable:
     def concat(self, other):
         return self.merge(other)
 
+    # ---------- 时间操作符 ----------
+    def delay(self, seconds):
+        """延迟发射所有值。"""
+        def _sub(observer):
+            def wrapped(value):
+                _threading.Timer(seconds, lambda v=value: observer(v)).start()
+            return self.subscribe(wrapped)
+        return _PyObservable(_sub)
+
+    def debounce(self, seconds):
+        """防抖：静默期后才发射最后一个值。"""
+        def _sub(observer):
+            timer = [None]
+            last_value = [None]
+
+            def wrapped(value):
+                last_value[0] = value
+                if timer[0] is not None:
+                    timer[0].cancel()
+                timer[0] = _threading.Timer(seconds, lambda: observer(last_value[0]))
+                timer[0].start()
+            return self.subscribe(wrapped)
+        return _PyObservable(_sub)
+
+    def throttle(self, seconds):
+        """节流：固定间隔内只发射第一个值。"""
+        def _sub(observer):
+            last_time = [0.0]
+
+            def wrapped(value):
+                now = time.time()
+                if now - last_time[0] >= seconds:
+                    last_time[0] = now
+                    observer(value)
+            return self.subscribe(wrapped)
+        return _PyObservable(_sub)
+
+    def timeout(self, seconds):
+        """超时：如果 seconds 秒内无值则终止。"""
+        def _sub(observer):
+            timed_out = [False]
+            timer = _threading.Timer(seconds, lambda: timed_out.__setitem__(0, True))
+            timer.start()
+
+            def wrapped(value):
+                if not timed_out[0]:
+                    observer(value)
+            sub = self.subscribe(wrapped)
+            timer.cancel()
+            return sub
+        return _PyObservable(_sub)
+
+    # ---------- 静态时间工厂 ----------
+    @staticmethod
+    def interval(period):
+        """定期发射递增整数。"""
+        def _sub(observer):
+            counter = [0]
+            stopped = [False]
+
+            def tick():
+                if not stopped[0]:
+                    observer(counter[0])
+                    counter[0] += 1
+                    _threading.Timer(period, tick).start()
+
+            _threading.Timer(period, tick).start()
+            sub = Subscription()
+            sub.dispose = lambda: stopped.__setitem__(0, True)
+            return sub
+        return _PyObservable(_sub)
+
+    @staticmethod
+    def timer(delay):
+        """延迟后发射 0。"""
+        def _sub(observer):
+            _threading.Timer(delay, lambda: observer(0)).start()
+            return Subscription()
+        return _PyObservable(_sub)
+
     def collect(self):
         """收集所有发射的值到一个列表（阻塞操作）。"""
         items: List[Any] = []
 
         def observer(value):
             items.append(value)
-        self._subscribe(observer)
+        self.subscribe(observer)
         return list(items)
 
     def run(self):
-        self._subscribe(lambda _: None)
+        self.subscribe(lambda _: None)
         return self
 
 
@@ -467,7 +600,7 @@ class _PyPublishSubject:
     def on_completed(self):
         self._observers.clear()
 
-    def subscribe(self, on_next):
+    def subscribe(self, on_next, on_error=None, on_completed=None):
         sub = Subscription()
         self._observers.append((on_next, sub))
         return sub
@@ -487,7 +620,7 @@ class _PyBehaviorSubject:
     def on_completed(self):
         self._observers.clear()
 
-    def subscribe(self, on_next):
+    def subscribe(self, on_next, on_error=None, on_completed=None):
         sub = Subscription()
         on_next(self._current)
         self._observers.append((on_next, sub))
@@ -499,15 +632,22 @@ class _PyBehaviorSubject:
 
 
 class _PyReplaySubject:
-    def __init__(self, capacity):
-        self._capacity = int(capacity)
-        self._buffer = []
+    def __init__(self, capacity=None, window=None):
+        self._capacity = int(capacity) if capacity is not None else None  # None=无限
+        self._window = window  # timedelta 或 None
+        self._buffer = []  # 存储 (timestamp, value) 元组
         self._observers = []
 
     def on_next(self, value):
-        self._buffer.append(value)
-        if len(self._buffer) > self._capacity:
+        now = time.time()
+        self._buffer.append((now, value))
+        # 按容量裁剪
+        if self._capacity is not None and len(self._buffer) > self._capacity:
             self._buffer.pop(0)
+        # 按时间窗口裁剪
+        if self._window is not None:
+            cutoff = now - self._window.total_seconds() if hasattr(self._window, 'total_seconds') else now - self._window
+            self._buffer = [(t, v) for t, v in self._buffer if t >= cutoff]
         for obs in list(self._observers):
             if not obs[1].is_disposed():
                 obs[0](value)
@@ -515,9 +655,9 @@ class _PyReplaySubject:
     def on_completed(self):
         self._observers.clear()
 
-    def subscribe(self, on_next):
+    def subscribe(self, on_next, on_error=None, on_completed=None):
         sub = Subscription()
-        for buffered in self._buffer:
+        for ts, buffered in self._buffer:
             on_next(buffered)
         self._observers.append((on_next, sub))
         return sub
@@ -597,14 +737,18 @@ class Observable:
 
     # ---------- 静态工厂方法 ----------
     @staticmethod
-    def of(value):
-        """创建一个发射单个值然后完成的 Observable。"""
+    def of(*values):
+        """创建一个发射给定值然后完成的 Observable。"""
+        if len(values) == 0:
+            raise TypeError("of() requires at least 1 argument")
         if _USE_RUST:
             try:
-                return Observable(_rust_mod.Observable.of(value))
+                if len(values) == 1:
+                    return Observable(_rust_mod.Observable.of(values[0]))
+                return Observable(_PyObservable.of(*values))
             except Exception:
                 pass
-        return Observable(_PyObservable.of(value))
+        return Observable(_PyObservable.of(*values))
 
     @staticmethod
     def from_iter(values):
@@ -658,17 +802,40 @@ class Observable:
 
     # ---------- 订阅方法 ----------
     def subscribe(self, on_next=None, on_error=None, on_completed=None):
-        """订阅 Observable，开始接收值。"""
+        """订阅 Observable，开始接收值。
+
+        Args:
+            on_next: 接收每个值的回调。
+            on_error: 发生异常时的回调（可选）。
+            on_completed: 完成时的回调（可选）。
+
+        Returns:
+            Subscription: 订阅句柄，可用于取消订阅。
+        """
         next_cb = on_next if on_next is not None else (lambda v: None)
-        if _USE_RUST and hasattr(self._inner, "subscribe"):
-            try:
-                rust_sub = self._inner.subscribe(next_cb)
-                if isinstance(rust_sub, Subscription):
-                    return rust_sub
-                return Subscription(rust_sub)
-            except Exception:
-                pass
-        return self._inner.subscribe(next_cb)
+        try:
+            if _USE_RUST and hasattr(self._inner, "subscribe"):
+                try:
+                    rust_sub = self._inner.subscribe(next_cb)
+                    if isinstance(rust_sub, Subscription):
+                        return rust_sub
+                    return Subscription(rust_sub)
+                except Exception:
+                    pass
+            return self._inner.subscribe(next_cb, on_error=on_error, on_completed=on_completed)
+        except Exception as e:
+            if on_error:
+                on_error(e)
+                return Subscription()
+            raise
+
+    # ---------- pipe ----------
+    def pipe(self, *operators):
+        """管道操作符，每个 operator 是 (Observable) -> Observable 的函数。"""
+        result = self
+        for op in operators:
+            result = op(result)
+        return result
 
     # ---------- 转换操作符 ----------
     def map(self, mapper):
@@ -837,6 +1004,34 @@ class Observable:
                 pass
         return Observable(self._inner.concat(other))
 
+    # ---------- 时间操作符 ----------
+    def delay(self, seconds):
+        """延迟发射所有值。"""
+        return Observable(self._inner.delay(seconds))
+
+    def debounce(self, seconds):
+        """防抖：静默期后才发射最后一个值。"""
+        return Observable(self._inner.debounce(seconds))
+
+    def throttle(self, seconds):
+        """节流：固定间隔内只发射第一个值。"""
+        return Observable(self._inner.throttle(seconds))
+
+    def timeout(self, seconds):
+        """超时：如果 seconds 秒内无值则终止。"""
+        return Observable(self._inner.timeout(seconds))
+
+    # ---------- 静态时间工厂 ----------
+    @staticmethod
+    def interval(period):
+        """定期发射递增整数。"""
+        return Observable(_PyObservable.interval(period))
+
+    @staticmethod
+    def timer(delay):
+        """延迟后发射 0。"""
+        return Observable(_PyObservable.timer(delay))
+
     # ---------- 收集 ----------
     def collect(self):
         """收集所有发射的值到一个列表（阻塞操作）。"""
@@ -896,7 +1091,7 @@ class PublishSubject:
     def subscribe(self, on_next=None, on_error=None, on_completed=None):
         """订阅这个 Subject，接收后续发射的值。"""
         next_cb = on_next if on_next is not None else (lambda v: None)
-        rust_sub = self._inner.subscribe(next_cb)
+        rust_sub = self._inner.subscribe(next_cb, on_error=on_error, on_completed=on_completed)
         if isinstance(rust_sub, Subscription):
             return rust_sub
         return Subscription(rust_sub)
@@ -935,7 +1130,7 @@ class BehaviorSubject:
     def subscribe(self, on_next=None, on_error=None, on_completed=None):
         """订阅，立即收到当前最新值。"""
         next_cb = on_next if on_next is not None else (lambda v: None)
-        rust_sub = self._inner.subscribe(next_cb)
+        rust_sub = self._inner.subscribe(next_cb, on_error=on_error, on_completed=on_completed)
         if isinstance(rust_sub, Subscription):
             return rust_sub
         return Subscription(rust_sub)
@@ -963,15 +1158,20 @@ class ReplaySubject:
     适合用于缓存历史事件、聊天消息等场景。
     """
 
-    def __init__(self, capacity):
-        """创建一个新的 ReplaySubject，指定缓冲区大小。"""
+    def __init__(self, capacity=None, window=None):
+        """创建一个新的 ReplaySubject。
+
+        Args:
+            capacity: 缓冲区最大容量（None 表示无限）
+            window: 时间窗口（timedelta 或秒数），超过此时间的值将被丢弃
+        """
         if _USE_RUST:
             try:
-                self._inner = _rust_mod.ReplaySubject(int(capacity))
+                self._inner = _rust_mod.ReplaySubject(int(capacity) if capacity is not None else 100)
             except Exception:
-                self._inner = _PyReplaySubject(capacity)
+                self._inner = _PyReplaySubject(capacity, window)
         else:
-            self._inner = _PyReplaySubject(capacity)
+            self._inner = _PyReplaySubject(capacity, window)
 
     def on_next(self, value):
         """发射一个值，并将其加入缓存。"""
@@ -986,7 +1186,7 @@ class ReplaySubject:
     def subscribe(self, on_next=None, on_error=None, on_completed=None):
         """订阅，会先收到缓存的历史值重放。"""
         next_cb = on_next if on_next is not None else (lambda v: None)
-        rust_sub = self._inner.subscribe(next_cb)
+        rust_sub = self._inner.subscribe(next_cb, on_error=on_error, on_completed=on_completed)
         if isinstance(rust_sub, Subscription):
             return rust_sub
         return Subscription(rust_sub)
@@ -1082,12 +1282,125 @@ class ImmediateScheduler:
 
 
 # ============================================================================
+# CompositeSubscription
+# ============================================================================
+
+class CompositeSubscription:
+    """组合多个 Subscription 统一管理。
+
+    示例:
+        >>> cs = CompositeSubscription()
+        >>> cs.add(sub1)
+        >>> cs.add(sub2)
+        >>> cs.dispose()  # 一次性释放所有
+    """
+
+    def __init__(self):
+        self._subs = []
+        self._disposed = False
+
+    def add(self, sub):
+        """添加一个子订阅"""
+        self._subs.append(sub)
+
+    def remove(self, sub):
+        """移除一个子订阅"""
+        try:
+            self._subs.remove(sub)
+        except ValueError:
+            pass
+
+    def dispose(self):
+        """释放所有子订阅"""
+        self._disposed = True
+        for sub in self._subs:
+            if hasattr(sub, 'dispose'):
+                sub.dispose()
+        self._subs.clear()
+
+    def is_disposed(self):
+        if self._disposed:
+            return True
+        return all(
+            (sub.is_disposed() if hasattr(sub, 'is_disposed') else True)
+            for sub in self._subs
+        ) if self._subs else False
+
+    def __repr__(self):
+        return f"CompositeSubscription({len(self._subs)} subs)"
+
+
+# ============================================================================
+# ops 模块 — 函数式操作符
+# ============================================================================
+
+class _OpModule:
+    """提供函数式操作符，用于 pipe() 风格"""
+
+    @staticmethod
+    def map(mapper):
+        return lambda obs: obs.map(mapper)
+
+    @staticmethod
+    def filter(predicate):
+        return lambda obs: obs.filter(predicate)
+
+    @staticmethod
+    def take(n):
+        return lambda obs: obs.take(n)
+
+    @staticmethod
+    def skip(n):
+        return lambda obs: obs.skip(n)
+
+    @staticmethod
+    def first():
+        return lambda obs: obs.first()
+
+    @staticmethod
+    def reduce(initial, reducer):
+        return lambda obs: obs.reduce(initial, reducer)
+
+    @staticmethod
+    def scan(initial, scanner):
+        return lambda obs: obs.scan(initial, scanner)
+
+    @staticmethod
+    def flat_map(mapper):
+        return lambda obs: obs.flat_map(mapper)
+
+    @staticmethod
+    def start_with(*values):
+        return lambda obs: obs.start_with(*values)
+
+    @staticmethod
+    def default_if_empty(default):
+        return lambda obs: obs.default_if_empty(default)
+
+    @staticmethod
+    def contains(target):
+        return lambda obs: obs.contains(target)
+
+    @staticmethod
+    def all(predicate):
+        return lambda obs: obs.all(predicate)
+
+    @staticmethod
+    def do_on_next(action):
+        return lambda obs: obs.do_on_next(action)
+
+
+ops = _OpModule()
+
+
+# ============================================================================
 # 导出符号
 # ============================================================================
 
 __all__ = [
     "Observable",
     "Subscription",
+    "CompositeSubscription",
     "PublishSubject",
     "BehaviorSubject",
     "ReplaySubject",
@@ -1095,4 +1408,5 @@ __all__ = [
     "ThreadPoolScheduler",
     "AsyncScheduler",
     "ImmediateScheduler",
+    "ops",
 ]
