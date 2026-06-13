@@ -1,0 +1,11 @@
+edition = "2021"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+indent_style = "Block"
+use_small_heuristics = "Default"
+use_field_init_shorthand = true
+use_try_shorthand = true
+force_explicit_abi = true
+overflow_delimited_expr = true

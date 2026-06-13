@@ -1,0 +1,44 @@
+target/
+**/*.rs.bk
+Cargo.lock
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+
+# Git 备份
+_git_backup/
+
+# 临时/部分文件
+*.part*
+*.partial*
+*.partial.*
+*~
+
+# 研究与临时文档
+research/
+
+# 开发辅助脚本
+append_tests.py
+check_syntax.py
+rewrite_tests.py
+verify_rust.py
+debug_import.py
+test_rxpy.py
+
+# 部分/草稿代码文件
+*_part.rs
+*.partial.txt
+*.part.txt
+
+# IDE
+.trae/

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rxpy"
+version = "0.1.0"
+description = "RxPY - Reactive Extensions for Python, powered by Rust (PyO3). A high-performance reactive programming library with Observable/Observer/Subject/Scheduler support."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Victor", email = "victor@rxpy.dev"},
+]
+maintainers = [
+    {name = "RxPY Contributors"},
+]
+keywords = [
+    "reactive",
+    "rx",
+    "reactivex",
+    "observable",
+    "streams",
+    "async",
+    "event-driven",
+    "rust",
+    "pyo3",
+    "functional-programming",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+
+[project.urls]
+"Homepage" = "https://gitcode.com/VictorTop/Rx-Rust"
+"Documentation" = "https://gitcode.com/VictorTop/Rx-Rust/blob/main/GUIDE.md"
+"Repository" = "https://gitcode.com/VictorTop/Rx-Rust.git"
+"Bug Reports" = "https://gitcode.com/VictorTop/Rx-Rust/issues"
+"Source" = "https://gitcode.com/VictorTop/Rx-Rust"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+doc = ["sphinx", "sphinx-rtd-theme"]
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+python-source = "python"
+module-name = "rxpy.rxpy"

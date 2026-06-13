@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "rx-rust",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["Rx-Rust Team <dev@rx-rust.io>"]
+description = "A Rust-idiomatic reactive programming library"
+license = "MIT"
+repository = "https://github.com/rx-rust/rx-rust"
+keywords = ["reactive", "rx", "observable", "stream"]
+categories = ["asynchronous", "concurrency", "data-structures"]
