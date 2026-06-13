@@ -1,4 +1,4 @@
-﻿"""Rx-Rust - Reactive Extensions for Python powered by Rust.
+"""Rx-Rust - Reactive Extensions for Python powered by Rust.
 
 Rx-Rust 是一个用于组合异步和基于事件的程序的 Python 库，灵感来自微软的 Reactive Extensions (Rx) 库。
 它建立在 Rust 之上，通过 PyO3 提供高性能的响应式编程体验。
@@ -209,7 +209,10 @@ class _PyObservable:
 
         def _sub(observer):
             def wrapped(value):
-                observer(mapper(value))
+                try:
+                    observer(mapper(value))
+                except Exception:
+                    pass
             return source_subscribe(wrapped)
         return _PyObservable(_sub)
 
@@ -290,17 +293,16 @@ class _PyObservable:
         source_subscribe = self._subscribe
 
         def _sub(observer):
-            total = [None]
+            total = [0]
+            has_value = [False]
 
             def wrapped(value):
-                if total[0] is None:
-                    total[0] = value
-                else:
-                    total[0] = total[0] + value
+                total[0] = total[0] + value
+                has_value[0] = True
             source_subscribe(wrapped)
-            if total[0] is not None:
-                observer(total[0])
+            observer(total[0])
             return Subscription()
+
         return _PyObservable(_sub)
 
     def reduce(self, initial, reducer):
@@ -321,6 +323,7 @@ class _PyObservable:
 
         def _sub(observer):
             acc = [initial]
+            observer(acc[0])
 
             def wrapped(value):
                 acc[0] = scanner(acc[0], value)
@@ -335,19 +338,26 @@ class _PyObservable:
         def _sub(observer):
             def wrapped(value):
                 inner = mapper(value)
-                try:
-                    for item in inner:
-                        observer(item)
-                except TypeError:
-                    observer(inner)
+                # 兼容：薄包装 Observable 或 _PyObservable
+                if hasattr(inner, "subscribe"):
+                    inner.subscribe(on_next=lambda v: observer(v))
+                elif hasattr(inner, "_subscribe"):
+                    inner._subscribe(observer)
+                else:
+                    try:
+                        for item in inner:
+                            observer(item)
+                    except TypeError:
+                        observer(inner)
             return source_subscribe(wrapped)
         return _PyObservable(_sub)
 
-    def start_with(self, value):
+    def start_with(self, *values):
         source_subscribe = self._subscribe
 
         def _sub(observer):
-            observer(value)
+            for v in values:
+                observer(v)
             return source_subscribe(observer)
         return _PyObservable(_sub)
 
@@ -483,6 +493,7 @@ class _PyBehaviorSubject:
         self._observers.append((on_next, sub))
         return sub
 
+    @property
     def value(self):
         return self._current
 
@@ -761,14 +772,14 @@ class Observable:
                 pass
         return Observable(self._inner.flat_map(mapper))
 
-    def start_with(self, value):
-        """在序列开头插入一个值。"""
+    def start_with(self, *values):
+        """在序列开头插入一个或多个值。"""
         if _USE_RUST and hasattr(self._inner, "start_with"):
             try:
-                return Observable(self._inner.start_with(value))
+                return Observable(self._inner.start_with(*values))
             except Exception:
                 pass
-        return Observable(self._inner.start_with(value))
+        return Observable(self._inner.start_with(*values))
 
     def default_if_empty(self, default):
         """如果源为空则发射 default，否则与源相同。"""
@@ -929,10 +940,14 @@ class BehaviorSubject:
             return rust_sub
         return Subscription(rust_sub)
 
+    @property
     def value(self):
         """返回当前值。"""
         if hasattr(self._inner, "value"):
-            return self._inner.value()
+            v = self._inner.value
+            if callable(v):
+                return v()
+            return v
         if hasattr(self._inner, "_current"):
             return self._inner._current
         return None

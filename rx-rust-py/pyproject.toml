@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Rx-Rust — Reactive Extensions for Python, powered by Rust (PyO3). A high-performance reactive programming library with Observable/Observer/Subject/Scheduler support."
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
+license-files = ["LICENSE"]
 authors = [
     {name = "Victor", email = "victor@rx-rust.dev"},
 ]

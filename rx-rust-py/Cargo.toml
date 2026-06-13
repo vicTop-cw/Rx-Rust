@@ -2,6 +2,14 @@
 name = "rx-rust-py"
 version = "0.1.0"
 edition = "2021"
+description = "Reactive Extensions for Python, powered by Rust (PyO3). A high-performance reactive programming library with Observable/Observer/Subject/Scheduler support."
+license = "MIT"
+homepage = "https://gitcode.com/VictorTop/Rx-Rust"
+repository = "https://gitcode.com/VictorTop/Rx-Rust.git"
+documentation = "https://gitcode.com/VictorTop/Rx-Rust/blob/main/GUIDE.md"
+keywords = ["reactive", "rx", "rx-rust", "observable", "streams", "async", "pyo3", "rust"]
+categories = ["asynchronous", "concurrency", "data-structures"]
+authors = ["Victor"]
 
 [workspace]
 

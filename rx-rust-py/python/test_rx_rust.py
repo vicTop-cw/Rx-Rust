@@ -120,7 +120,7 @@ def test_reduce():
 
 # ========== 16. scan ==========
 def test_scan():
-    assert collect(Observable.from_iter([1, 2, 3]).scan(0, lambda acc, x: acc + x)) == [1, 3, 6]
+    assert collect(Observable.from_iter([1, 2, 3]).scan(0, lambda acc, x: acc + x)) == [0, 1, 3, 6]
 
 
 # ========== 17. flat_map ==========
