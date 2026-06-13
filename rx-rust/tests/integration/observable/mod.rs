@@ -1241,4 +1241,103 @@ mod tests {
 
         assert_eq!(values.lock().unwrap().as_slice(), &[1, 2, 3]);
     }
+
+    // ===== 新增测试：完整覆盖 range / from_iter / map / filter / take / skip / reduce / subject_broadcast =====
+
+    fn collect_obs<T: Clone + Send + Sync + 'static>(
+        obs: impl Observable<T, ()> + 'static,
+    ) -> Vec<T> {
+        let values: Arc<Mutex<Vec<T>>> = Arc::new(Mutex::new(Vec::new()));
+        let values_clone = Arc::clone(&values);
+        obs.subscribe(FnObserver::new(
+            move |v: Result<T, ()>| {
+                if let Ok(val) = v {
+                    values_clone.lock().unwrap().push(val);
+                }
+            },
+            || {},
+        ));
+        let snapshot = values.lock().unwrap().clone();
+        snapshot
+    }
+
+    #[test]
+    fn test_range_emits_correct_count() {
+        let v = collect_obs(range::<i32, ()>(5, 5));
+        assert_eq!(v.len(), 5);
+        assert_eq!(v[0], 5);
+        assert_eq!(v[4], 9);
+        assert_eq!(v.as_slice(), &[5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_from_iter_order_preserved() {
+        let v = collect_obs(from_iter::<i32, ()>(vec![10, 20, 30, 40]));
+        assert_eq!(v, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn test_map_transform_values() {
+        let v = collect_obs(from_iter::<i32, ()>(vec![1, 2, 3]).map(|x| x * 100));
+        assert_eq!(v, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn test_filter_by_predicate() {
+        let v = collect_obs(
+            from_iter::<i32, ()>(vec![1, 2, 3, 4, 5, 6]).filter(|x| x % 2 == 0),
+        );
+        assert_eq!(v, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_take_halts_early() {
+        let v = collect_obs(from_iter::<i32, ()>(vec![1, 2, 3, 4, 5]).take(3));
+        assert_eq!(v, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_skip_skips_prefix() {
+        let v = collect_obs(from_iter::<i32, ()>(vec![1, 2, 3, 4, 5]).skip(2));
+        assert_eq!(v, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_reduce_sum_emits_final() {
+        let v = collect_obs(from_iter::<i32, ()>(vec![1, 2, 3, 4]).reduce(0, |acc, x| acc + x));
+        assert_eq!(v, vec![10]);
+    }
+
+    #[test]
+    fn test_publish_subject_broadcasts_to_all() {
+        let subject = PublishSubject::<i32, ()>::new();
+        let v1: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+        let v2: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+        let v1c = Arc::clone(&v1);
+        let v2c = Arc::clone(&v2);
+
+        let _sub1 = subject.subscribe_ref(FnObserver::new(
+            move |v: Result<i32, ()>| {
+                if let Ok(val) = v {
+                    v1c.lock().unwrap().push(val);
+                }
+            },
+            || {},
+        ));
+        let _sub2 = subject.subscribe_ref(FnObserver::new(
+            move |v: Result<i32, ()>| {
+                if let Ok(val) = v {
+                    v2c.lock().unwrap().push(val);
+                }
+            },
+            || {},
+        ));
+
+        subject.on_next(Ok(1));
+        subject.on_next(Ok(2));
+        subject.on_next(Ok(3));
+
+        assert_eq!(*v1.lock().unwrap(), vec![1, 2, 3]);
+        assert_eq!(*v2.lock().unwrap(), vec![1, 2, 3]);
+    }
 }
