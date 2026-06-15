@@ -182,17 +182,6 @@ impl MouseEventType {
 pub struct KeyModifier(pub i32);
 
 impl KeyModifier {
-    pub const NONE: i32 = 0;
-    pub const SHIFT: i32 = 1;
-    pub const CTRL: i32 = 2;
-    pub const ALT: i32 = 4;
-    pub const WIN: i32 = 8;
-    pub const CAPSLOCK: i32 = 16;
-    pub const LSHIFT: i32 = 32;
-    pub const RSHIFT: i32 = 64;
-    pub const LCTRL: i32 = 128;
-    pub const RCTRL: i32 = 256;
-
     pub fn to_name(&self) -> &'static str {
         match self.0 {
             0 => "NONE",
@@ -343,7 +332,7 @@ impl KeyData {
         window_title: Option<String>,
     ) -> Self {
         let key_name = if key_name.is_empty() {
-            key_code_to_name(key_code)
+            key_code_to_name(key_code).to_string()
         } else {
             key_name
         };
