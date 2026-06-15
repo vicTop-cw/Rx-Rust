@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import time
 import threading as _threading
+import collections as _collections
 from typing import Any, Callable, Iterable, List, Optional
 
 # ============================================================================
@@ -579,13 +580,964 @@ class _PyObservable:
         self.subscribe(observer)
         return list(items)
 
+    # ---------- 统计聚合 ----------
+    def min(self):
+        """发射流中的最小值。空流不发射。"""
+        def _sub(observer):
+            min_val = [None]
+            has_val = [False]
+
+            def wrapped(value):
+                try:
+                    if not has_val[0] or value < min_val[0]:
+                        min_val[0] = value
+                    has_val[0] = True
+                except Exception:
+                    raise
+            self.subscribe(wrapped)
+            if has_val[0]:
+                observer(min_val[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def max(self):
+        """发射流中的最大值。空流不发射。"""
+        def _sub(observer):
+            max_val = [None]
+            has_val = [False]
+
+            def wrapped(value):
+                if not has_val[0] or value > max_val[0]:
+                    max_val[0] = value
+                has_val[0] = True
+            self.subscribe(wrapped)
+            if has_val[0]:
+                observer(max_val[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def mean(self):
+        """发射数值的平均值。空流不发射。"""
+        def _sub(observer):
+            total = [0.0]
+            count = [0]
+
+            def wrapped(value):
+                total[0] += value
+                count[0] += 1
+            self.subscribe(wrapped)
+            if count[0] > 0:
+                observer(total[0] / count[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def average(self):
+        """同 mean()。发射数值的平均值。"""
+        return self.mean()
+
+    def median(self):
+        """发射中位数（需要缓冲所有值，仅对有限流适用）。"""
+        def _sub(observer):
+            vals = []
+
+            def wrapped(value):
+                vals.append(value)
+            self.subscribe(wrapped)
+            if vals:
+                sorted_vals = sorted(vals)
+                n = len(sorted_vals)
+                if n % 2 == 1:
+                    observer(sorted_vals[n // 2])
+                else:
+                    observer((sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2.0)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def variance(self, ddof=0):
+        """发射方差。ddof=0 为总体方差，ddof=1 为样本方差。"""
+        def _sub(observer):
+            vals = []
+
+            def wrapped(value):
+                vals.append(value)
+            self.subscribe(wrapped)
+            n = len(vals)
+            if n > ddof:
+                mean_val = sum(vals) / n
+                var = sum((x - mean_val) ** 2 for x in vals) / (n - ddof)
+                observer(var)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def std(self, ddof=0):
+        """发射标准差。"""
+        def _sub(observer):
+            vals = []
+
+            def wrapped(value):
+                vals.append(value)
+            self.subscribe(wrapped)
+            n = len(vals)
+            if n > ddof:
+                mean_val = sum(vals) / n
+                var = sum((x - mean_val) ** 2 for x in vals) / (n - ddof)
+                observer(var ** 0.5)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def quantile(self, q):
+        """发射分位数。q ∈ [0, 1]。0.5 为中位数。"""
+        def _sub(observer):
+            vals = []
+
+            def wrapped(value):
+                vals.append(value)
+            self.subscribe(wrapped)
+            if vals:
+                sorted_vals = sorted(vals)
+                n = len(sorted_vals)
+                idx = q * (n - 1)
+                lo = int(idx)
+                hi = min(lo + 1, n - 1)
+                frac = idx - lo
+                observer(sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo]))
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def arg_min(self):
+        """发射最小值的下标索引（从 0 开始）。"""
+        def _sub(observer):
+            best_idx = [-1]
+            best_val = [None]
+            idx = [0]
+
+            def wrapped(value):
+                if best_idx[0] == -1 or value < best_val[0]:
+                    best_val[0] = value
+                    best_idx[0] = idx[0]
+                idx[0] += 1
+            self.subscribe(wrapped)
+            if best_idx[0] != -1:
+                observer(best_idx[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def arg_max(self):
+        """发射最大值的下标索引（从 0 开始）。"""
+        def _sub(observer):
+            best_idx = [-1]
+            best_val = [None]
+            idx = [0]
+
+            def wrapped(value):
+                if best_idx[0] == -1 or value > best_val[0]:
+                    best_val[0] = value
+                    best_idx[0] = idx[0]
+                idx[0] += 1
+            self.subscribe(wrapped)
+            if best_idx[0] != -1:
+                observer(best_idx[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def n_unique(self):
+        """发射流中不重复值的数量。"""
+        def _sub(observer):
+            seen = set()
+
+            def wrapped(value):
+                seen.add(value)
+            self.subscribe(wrapped)
+            observer(len(seen))
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def any(self, predicate):
+        """只要有一个值满足谓词就发射 True，遍历结束无则发射 False。"""
+        def _sub(observer):
+            found = [False]
+
+            def wrapped(value):
+                if not found[0]:
+                    if predicate(value):
+                        found[0] = True
+            self.subscribe(wrapped)
+            observer(found[0])
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 滚动窗口 ----------
+    def rolling_min(self, window_size):
+        """维护最近 window_size 个值的滚动最小值。窗口未满也发射。"""
+        window_size = int(window_size)
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            dq = deque(maxlen=window_size)
+
+            def wrapped(value):
+                dq.append(value)
+                observer(min(dq))
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def rolling_max(self, window_size):
+        """维护最近 window_size 个值的滚动最大值。"""
+        window_size = int(window_size)
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            dq = deque(maxlen=window_size)
+
+            def wrapped(value):
+                dq.append(value)
+                observer(max(dq))
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def rolling_sum(self, window_size):
+        """维护最近 window_size 个值的滚动和。"""
+        window_size = int(window_size)
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            dq = deque(maxlen=window_size)
+            current_sum = [0]
+
+            def wrapped(value):
+                if len(dq) == window_size:
+                    current_sum[0] -= dq[0]
+                current_sum[0] += value
+                dq.append(value)
+                observer(current_sum[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def rolling_mean(self, window_size):
+        """维护最近 window_size 个值的滚动均值。"""
+        window_size = int(window_size)
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            dq = deque(maxlen=window_size)
+            current_sum = [0]
+
+            def wrapped(value):
+                if len(dq) == window_size:
+                    current_sum[0] -= dq[0]
+                current_sum[0] += value
+                dq.append(value)
+                observer(current_sum[0] / len(dq))
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 累积变换 ----------
+    def cum_sum(self):
+        """每步累积求和。"""
+        def _sub(observer):
+            acc = [0]
+
+            def wrapped(value):
+                acc[0] += value
+                observer(acc[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def cum_min(self):
+        """每步累积最小值。"""
+        def _sub(observer):
+            acc = [None]
+            first = [True]
+
+            def wrapped(value):
+                if first[0]:
+                    acc[0] = value
+                    first[0] = False
+                else:
+                    acc[0] = min(acc[0], value)
+                observer(acc[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def cum_max(self):
+        """每步累积最大值。"""
+        def _sub(observer):
+            acc = [None]
+            first = [True]
+
+            def wrapped(value):
+                if first[0]:
+                    acc[0] = value
+                    first[0] = False
+                else:
+                    acc[0] = max(acc[0], value)
+                observer(acc[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def cum_mean(self):
+        """每步累积均值。"""
+        def _sub(observer):
+            running_sum = [0.0]
+            running_count = [0]
+
+            def wrapped(value):
+                running_sum[0] += value
+                running_count[0] += 1
+                observer(running_sum[0] / running_count[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def cum_prod(self):
+        """每步累积乘积。"""
+        def _sub(observer):
+            acc = [1]
+
+            def wrapped(value):
+                acc[0] *= value
+                observer(acc[0])
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 排序 Top-N ----------
+    def sort(self, key=None, reverse=False):
+        """收集全部值排序后发射（仅对有限流适用）。"""
+        def _sub(observer):
+            vals = []
+
+            def wrapped(value):
+                vals.append(value)
+            self.subscribe(wrapped)
+            for v in sorted(vals, key=key, reverse=reverse):
+                observer(v)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def top_k(self, k, key=None):
+        """返回前 k 个最大值（堆实现，节省内存）。"""
+        k = int(k)
+        if k <= 0:
+            raise ValueError("k must be positive")
+
+        def _sub(observer):
+            import heapq
+            heap = []  # min-heap of size at most k
+            counter = [0]
+
+            def wrapped(value):
+                kvalue = key(value) if key else value
+                if counter[0] < k:
+                    heapq.heappush(heap, (kvalue, counter[0], value))
+                else:
+                    if kvalue > heap[0][0]:
+                        heapq.heapreplace(heap, (kvalue, counter[0], value))
+                counter[0] += 1
+            self.subscribe(wrapped)
+            sorted_items = sorted(heap, key=lambda t: t[0], reverse=True)
+            for _, _, v in sorted_items:
+                observer(v)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def bottom_k(self, k, key=None):
+        """返回最小的 k 个值（堆实现），按升序排列。"""
+        k = int(k)
+        if k <= 0:
+            raise ValueError("k must be positive")
+
+        def _sub(observer):
+            import heapq
+            heap = []  # max-heap via negation: stores (-value, counter, value)
+            counter = [0]
+
+            def wrapped(value):
+                kvalue = key(value) if key else value
+                if counter[0] < k:
+                    heapq.heappush(heap, (-kvalue, counter[0], value))
+                else:
+                    if kvalue < -heap[0][0]:
+                        heapq.heapreplace(heap, (-kvalue, counter[0], value))
+                counter[0] += 1
+            self.subscribe(wrapped)
+            # 按原始值升序发射
+            sorted_items = sorted(heap, key=lambda t: t[0], reverse=True)
+            for _, _, v in sorted_items:
+                observer(v)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 过滤/选择算子 ----------
+    def distinct(self):
+        """去重：每个值只发射一次。"""
+        def _sub(observer):
+            seen = set()
+
+            def wrapped(value):
+                if value not in seen:
+                    seen.add(value)
+                    observer(value)
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def element_at(self, idx):
+        """发射第 idx 个值（0-based）。越界不发射。"""
+        idx = int(idx)
+
+        def _sub(observer):
+            i = [0]
+
+            def wrapped(value):
+                if i[0] == idx:
+                    observer(value)
+                    i[0] = idx + 2  # mark done，避免二次匹配
+                else:
+                    i[0] += 1
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def take_while(self, predicate):
+        """满足谓词时取，遇到第一个不满足值即终止。"""
+        def _sub(observer):
+            stopped = [False]
+
+            def wrapped(value):
+                if stopped[0]:
+                    return
+                if predicate(value):
+                    observer(value)
+                else:
+                    stopped[0] = True
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def skip_while(self, predicate):
+        """跳过满足谓词的值，直到第一个不满足后全部发射。"""
+        def _sub(observer):
+            skipping = [True]
+
+            def wrapped(value):
+                if skipping[0]:
+                    if predicate(value):
+                        return
+                    skipping[0] = False
+                observer(value)
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def take_last(self, n):
+        """取最后 n 个值（需要缓冲）。"""
+        n = int(n)
+        if n <= 0:
+            raise ValueError("n must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            dq = deque(maxlen=n)
+
+            def wrapped(value):
+                dq.append(value)
+            self.subscribe(wrapped)
+            for v in dq:
+                observer(v)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def skip_last(self, n):
+        """跳过最后 n 个值（需要缓冲）。"""
+        n = int(n)
+        if n <= 0:
+            raise ValueError("n must be positive")
+
+        def _sub(observer):
+            from collections import deque
+            buffer = deque()
+
+            def wrapped(value):
+                if len(buffer) >= n:
+                    observer(buffer.popleft())
+                buffer.append(value)
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 组合算子 ----------
+    def switch_map(self, mapper):
+        """新值到来时取消前一个内层订阅，切换到新的 Observable。"""
+        def _sub(observer):
+            current_sub = [None]
+
+            def wrapped(value):
+                inner = mapper(value)
+                if hasattr(inner, "_subscribe"):
+                    inner_src = inner._subscribe
+                elif hasattr(inner, "subscribe"):
+                    inner_src = inner.subscribe
+                else:
+                    # 兼容可迭代
+                    try:
+                        for item in inner:
+                            observer(item)
+                        return
+                    except TypeError:
+                        observer(inner)
+                        return
+                if current_sub[0] is not None and hasattr(current_sub[0], 'dispose'):
+                    try:
+                        current_sub[0].dispose()
+                    except Exception:
+                        pass
+                current_sub[0] = inner_src(observer)
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def combine_latest(self, other, combiner):
+        """两边都有过值后，任一方更新都发射最新组合。"""
+        def _sub(observer):
+            latest_a = [None]
+            latest_b = [None]
+            has_a = [False]
+            has_b = [False]
+
+            def on_a(v):
+                latest_a[0] = v
+                has_a[0] = True
+                if has_b[0]:
+                    observer(combiner(latest_a[0], latest_b[0]))
+
+            def on_b(v):
+                latest_b[0] = v
+                has_b[0] = True
+                if has_a[0]:
+                    observer(combiner(latest_a[0], latest_b[0]))
+            self.subscribe(on_a)
+            if hasattr(other, "_subscribe"):
+                other._subscribe(on_b)
+            elif hasattr(other, "subscribe"):
+                other.subscribe(on_next=on_b)
+            else:
+                # 兼容可迭代
+                for item in other:
+                    on_b(item)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 错误处理 ----------
+    def catch_error(self, handler):
+        """异常时调用 handler(err) 返回新的 Observable 继续。"""
+        def _sub(observer):
+            has_error = [False]
+
+            def wrapped(value):
+                if not has_error[0]:
+                    observer(value)
+
+            def err_handler(err):
+                has_error[0] = True
+                fallback = handler(err)
+                if hasattr(fallback, "_subscribe"):
+                    fallback._subscribe(observer)
+                elif hasattr(fallback, "subscribe"):
+                    fallback.subscribe(on_next=observer)
+                else:
+                    observer(fallback)
+            return self.subscribe(wrapped, on_error=err_handler)
+        return _PyObservable(_sub)
+
+    def retry(self, count):
+        """失败时重试最多 count 次。"""
+        count = int(count)
+
+        def _sub(observer):
+            for _ in range(count + 1):
+                err_occurred = [False]
+                completed = [False]
+
+                def on_next(v):
+                    if not err_occurred[0] and not completed[0]:
+                        observer(v)
+
+                def on_err(e):
+                    err_occurred[0] = True
+
+                def on_completed():
+                    completed[0] = True
+                try:
+                    self.subscribe(on_next, on_error=on_err, on_completed=on_completed)
+                except Exception as e:
+                    err_occurred[0] = True
+                if not err_occurred[0]:
+                    return Subscription()
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def retry_with_delay(self, count, delay_seconds):
+        """失败后延迟 delay_seconds 再重试。"""
+        count = int(count)
+        delay_seconds = float(delay_seconds)
+
+        def _sub(observer):
+            for attempt in range(count + 1):
+                err_occurred = [False]
+                err_val = [None]
+
+                def on_next(v):
+                    observer(v)
+
+                def on_err(e):
+                    err_occurred[0] = True
+                    err_val[0] = e
+                try:
+                    self.subscribe(on_next, on_error=on_err)
+                except Exception as e:
+                    err_occurred[0] = True
+                    err_val[0] = e
+                if not err_occurred[0]:
+                    return Subscription()
+                if attempt == count:
+                    # 最后一次也失败
+                    return Subscription()
+                time.sleep(delay_seconds)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 轻量过滤 ----------
+    def distinct_until_changed(self):
+        """只当值与上一个不同时才发射。"""
+        def _sub(observer):
+            last = [None]
+            first = [True]
+
+            def wrapped(value):
+                if first[0]:
+                    observer(value)
+                    last[0] = value
+                    first[0] = False
+                    return
+                if last[0] != value:
+                    observer(value)
+                    last[0] = value
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def ignore_elements(self):
+        """不发射任何值，只转发完成信号。"""
+        def _sub(observer):
+            self.subscribe(lambda v: None)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    # ---------- 多播 share/publish ----------
+    def share(self):
+        """多个订阅者共享同一个源订阅。"""
+        source = self
+        subscribers = []
+        ref_count = [0]
+        src_sub = [None]
+
+        def dispatch(value):
+            for fn, sub in list(subscribers):
+                if not sub.is_disposed():
+                    fn(value)
+
+        def subscribe(on_next, on_error=None, on_completed=None):
+            sub = Subscription()
+            subscribers.append((on_next, sub))
+            if ref_count[0] == 0:
+                src_sub[0] = source._subscribe(dispatch)
+            ref_count[0] += 1
+            # 包装 dispose 以减少 ref_count
+            original_dispose = sub.dispose
+
+            def wrapped_dispose():
+                try:
+                    original_dispose()
+                except Exception:
+                    pass
+                ref_count[0] -= 1
+                if ref_count[0] <= 0:
+                    if src_sub[0] is not None and hasattr(src_sub[0], 'dispose'):
+                        try:
+                            src_sub[0].dispose()
+                        except Exception:
+                            pass
+                    src_sub[0] = None
+                    ref_count[0] = 0
+            sub.dispose = wrapped_dispose
+            return sub
+
+        def _sub(observer):
+            return subscribe(observer)
+        return _PyObservable(_sub)
+
+    def publish(self):
+        """publish：类似 share，但需要手动 connect()。简化版等同 share。"""
+        return self.share()
+
+    # ---------- None 处理 & 数学工具 ----------
+    def drop_none(self):
+        """过滤掉值为 None 的元素。"""
+        return self.filter(lambda x: x is not None)
+
+    def fill_none(self, default_value):
+        """将 None 替换为 default_value。"""
+        return self.map(lambda x: default_value if x is None else x)
+
+    def abs(self):
+        """对每个值取绝对值。"""
+        return self.map(lambda x: x if x >= 0 else -x)
+
+    def clamp(self, min_val, max_val):
+        """将值限制在 [min_val, max_val] 区间。"""
+        return self.map(lambda x: max(min_val, min(max_val, x)))
+
+    # ---------- 嵌套展开 ----------
+    def explode(self):
+        """Iterable 展开为逐个值发射；str/bytes 作为单个值。"""
+        def _sub(observer):
+            def wrapped(value):
+                if isinstance(value, (str, bytes)):
+                    observer(value)
+                    return
+                try:
+                    for item in value:
+                        observer(item)
+                except TypeError:
+                    observer(value)
+            self.subscribe(wrapped)
+            return Subscription()
+        return _PyObservable(_sub)
+
+    def flatten(self):
+        """同 explode()。展平嵌套序列。"""
+        return self.explode()
+
+    def dispatch_to_workers(self, fn=None, num_workers=4, buffer_size=0,
+                            on_drop=None, drop_strategy="oldest", **kwargs):
+        """按闲/忙状态分发到 worker 池（带并发上限的 flat_map）。
+
+        核心语义:
+          - 上游每个值 -> 找一个"空闲"的 worker -> 调用 ``fn(value)`` -> 结果发给下游
+          - worker "忙"期间不会再分配新值
+          - 所有 worker 都忙时: 新值进入缓冲队列
+          - 缓冲队列满时: 按 ``drop_strategy`` 丢弃（并调用 ``on_drop``）
+          - 结果按"先完成先发出"的顺序输出。
+
+        Args:
+            fn: 每个值的处理函数，支持同步函数
+            num_workers: 最大并发 worker 数，必须 >= 1（默认 4）
+            buffer_size: 缓冲队列大小，0 表示不限（可能导致内存无限增长）
+            on_drop: 值被丢弃时的回调，接收被丢弃的值作为唯一参数
+            drop_strategy: ``"oldest"`` 缓冲满时丢弃最旧的；
+                            ``"newest"`` 缓冲满时丢弃新来的
+
+        Returns:
+            Observable: 发射 fn 处理后的结果流
+        """
+        if num_workers < 1:
+            raise ValueError("num_workers must be >= 1, got %d" % num_workers)
+        if drop_strategy not in ("oldest", "newest"):
+            raise ValueError(
+                "drop_strategy must be 'oldest' or 'newest', got %r"
+                % drop_strategy
+            )
+        if fn is None:
+            fn = lambda x: x
+
+        def _sub(observer):
+            from collections import deque
+            from concurrent.futures import ThreadPoolExecutor
+
+            executor = ThreadPoolExecutor(max_workers=num_workers)
+            state_lock = _threading.Lock()
+            done_event = _threading.Event()
+            state = {
+                "buffer": deque(),
+                "active": 0,
+                "closed": False,
+                "errored": False,
+                "completed_called": False,
+            }
+
+            def submit_next_from_buffer():
+                """从 buffer 中取一项提交到线程池（无竞态: 返回前释放锁）。"""
+                with state_lock:
+                    if state["errored"] or state["completed_called"]:
+                        return False
+                    if state["active"] >= num_workers or len(state["buffer"]) == 0:
+                        return False
+                    value = state["buffer"].popleft()
+                    state["active"] += 1
+
+                def worker_task(v=value):
+                    try:
+                        result = fn(v)
+                    except Exception as e:
+                        with state_lock:
+                            state["active"] -= 1
+                            if (not state["errored"]
+                                    and not state["completed_called"]
+                                    and hasattr(observer, "on_error")):
+                                observer.on_error(e)
+                        _check_and_signal_done()
+                        return
+
+                    try:
+                        if hasattr(observer, "on_next"):
+                            observer.on_next(result)
+                        elif callable(observer):
+                            observer(result)
+                    except Exception as e:
+                        with state_lock:
+                            state["errored"] = True
+                        _check_and_signal_done()
+                        return
+
+                    should_finish = False
+                    with state_lock:
+                        state["active"] -= 1
+                        if (state["closed"] and not state["errored"]
+                                and not state["completed_called"]
+                                and state["active"] == 0
+                                and len(state["buffer"]) == 0):
+                            state["completed_called"] = True
+                            should_finish = True
+
+                    if should_finish:
+                        if hasattr(observer, "on_completed"):
+                            observer.on_completed()
+                        done_event.set()
+                        return
+
+                    submit_next_from_buffer()
+
+                executor.submit(worker_task)
+                return True
+
+            def pump_buffer():
+                """尽可能从 buffer 提交任务（直到 active 满或 buffer 空）。"""
+                while submit_next_from_buffer():
+                    pass
+
+            def _check_and_signal_done():
+                with state_lock:
+                    if ((state["closed"] or state["errored"])
+                            and state["active"] == 0
+                            and len(state["buffer"]) == 0):
+                        done_event.set()
+
+            def on_next(value):
+                with state_lock:
+                    if state["errored"] or state["completed_called"] or state["closed"]:
+                        return
+                    full = (buffer_size > 0
+                            and state["active"] >= num_workers
+                            and len(state["buffer"]) >= buffer_size)
+                    if full:
+                        if drop_strategy == "oldest":
+                            dropped = state["buffer"].popleft()
+                        else:
+                            dropped = value
+                        if on_drop is not None:
+                            try:
+                                on_drop(dropped)
+                            except Exception:
+                                pass
+                        if drop_strategy == "newest":
+                            return
+                    state["buffer"].append(value)
+                pump_buffer()
+
+            def on_error(error):
+                with state_lock:
+                    if state["errored"] or state["completed_called"]:
+                        return
+                    state["errored"] = True
+                    state["buffer"].clear()
+                if hasattr(observer, "on_error"):
+                    observer.on_error(error)
+                done_event.set()
+
+            def on_completed():
+                with state_lock:
+                    if state["closed"] or state["errored"] or state["completed_called"]:
+                        return
+                    state["closed"] = True
+                    if state["active"] == 0 and len(state["buffer"]) == 0:
+                        state["completed_called"] = True
+                        if hasattr(observer, "on_completed"):
+                            observer.on_completed()
+                        done_event.set()
+
+            source_sub = self.subscribe(
+                on_next=on_next,
+                on_error=on_error,
+                on_completed=on_completed,
+            )
+
+            def unsubscribe():
+                with state_lock:
+                    state["closed"] = True
+                    state["errored"] = True
+                    state["buffer"].clear()
+                done_event.set()
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+                if hasattr(source_sub, "unsubscribe"):
+                    source_sub.unsubscribe()
+                elif hasattr(source_sub, "dispose"):
+                    source_sub.dispose()
+
+            # 等待所有 worker 完成（对同步源场景很重要）
+            done_event.wait()
+            try:
+                executor.shutdown(wait=True)
+            except Exception:
+                pass
+
+            return Subscription(unsubscribe)
+
+        return _PyObservable(_sub)
+
+    def dispatch_workers(self, fn=None, num_workers=4, buffer_size=0,
+                        on_drop=None, drop_strategy="oldest", **kwargs):
+        """``dispatch_to_workers`` 的短别名。"""
+        return self.dispatch_to_workers(
+            fn=fn, num_workers=num_workers, buffer_size=buffer_size,
+            on_drop=on_drop, drop_strategy=drop_strategy, **kwargs
+        )
+
     def run(self):
         self.subscribe(lambda _: None)
         return self
 
 
 # ============================================================================
-# Subject - 纯 Python 实现
+# Subject - 广播型主题
 # ============================================================================
 
 class _PyPublishSubject:
@@ -1042,6 +1994,456 @@ class Observable:
                 pass
         return self._inner.collect()
 
+    # ---------- 统计聚合 ----------
+    def min(self):
+        """发射流中的最小值。空流不发射。"""
+        if _USE_RUST and hasattr(self._inner, "min"):
+            try:
+                return Observable(self._inner.min())
+            except Exception:
+                pass
+        return Observable(self._inner.min())
+
+    def max(self):
+        """发射流中的最大值。空流不发射。"""
+        if _USE_RUST and hasattr(self._inner, "max"):
+            try:
+                return Observable(self._inner.max())
+            except Exception:
+                pass
+        return Observable(self._inner.max())
+
+    def mean(self):
+        """发射数值的平均值。空流不发射。"""
+        if _USE_RUST and hasattr(self._inner, "mean"):
+            try:
+                return Observable(self._inner.mean())
+            except Exception:
+                pass
+        return Observable(self._inner.mean())
+
+    def average(self):
+        """同 mean()。发射数值的平均值。"""
+        return self.mean()
+
+    def median(self):
+        """发射中位数（需要缓冲所有值，仅对有限流适用）。"""
+        if _USE_RUST and hasattr(self._inner, "median"):
+            try:
+                return Observable(self._inner.median())
+            except Exception:
+                pass
+        return Observable(self._inner.median())
+
+    def variance(self, ddof=0):
+        """发射方差。ddof=0 为总体方差，ddof=1 为样本方差。"""
+        if _USE_RUST and hasattr(self._inner, "variance"):
+            try:
+                return Observable(self._inner.variance(ddof))
+            except Exception:
+                pass
+        return Observable(self._inner.variance(ddof))
+
+    def std(self, ddof=0):
+        """发射标准差。"""
+        if _USE_RUST and hasattr(self._inner, "std"):
+            try:
+                return Observable(self._inner.std(ddof))
+            except Exception:
+                pass
+        return Observable(self._inner.std(ddof))
+
+    def quantile(self, q):
+        """发射分位数。q ∈ [0, 1]。0.5 为中位数。"""
+        if _USE_RUST and hasattr(self._inner, "quantile"):
+            try:
+                return Observable(self._inner.quantile(q))
+            except Exception:
+                pass
+        return Observable(self._inner.quantile(q))
+
+    def arg_min(self):
+        """发射最小值的下标索引（从 0 开始）。"""
+        if _USE_RUST and hasattr(self._inner, "arg_min"):
+            try:
+                return Observable(self._inner.arg_min())
+            except Exception:
+                pass
+        return Observable(self._inner.arg_min())
+
+    def arg_max(self):
+        """发射最大值的下标索引（从 0 开始）。"""
+        if _USE_RUST and hasattr(self._inner, "arg_max"):
+            try:
+                return Observable(self._inner.arg_max())
+            except Exception:
+                pass
+        return Observable(self._inner.arg_max())
+
+    def n_unique(self):
+        """发射流中不重复值的数量。"""
+        if _USE_RUST and hasattr(self._inner, "n_unique"):
+            try:
+                return Observable(self._inner.n_unique())
+            except Exception:
+                pass
+        return Observable(self._inner.n_unique())
+
+    def any(self, predicate):
+        """只要有一个值满足谓词就发射 True，遍历结束无则发射 False。"""
+        if _USE_RUST and hasattr(self._inner, "any"):
+            try:
+                return Observable(self._inner.any(predicate))
+            except Exception:
+                pass
+        return Observable(self._inner.any(predicate))
+
+    # ---------- 滚动窗口 ----------
+    def rolling_min(self, window_size):
+        """维护最近 window_size 个值的滚动最小值。窗口未满也发射。"""
+        if _USE_RUST and hasattr(self._inner, "rolling_min"):
+            try:
+                return Observable(self._inner.rolling_min(window_size))
+            except Exception:
+                pass
+        return Observable(self._inner.rolling_min(window_size))
+
+    def rolling_max(self, window_size):
+        """维护最近 window_size 个值的滚动最大值。"""
+        if _USE_RUST and hasattr(self._inner, "rolling_max"):
+            try:
+                return Observable(self._inner.rolling_max(window_size))
+            except Exception:
+                pass
+        return Observable(self._inner.rolling_max(window_size))
+
+    def rolling_sum(self, window_size):
+        """维护最近 window_size 个值的滚动和。"""
+        if _USE_RUST and hasattr(self._inner, "rolling_sum"):
+            try:
+                return Observable(self._inner.rolling_sum(window_size))
+            except Exception:
+                pass
+        return Observable(self._inner.rolling_sum(window_size))
+
+    def rolling_mean(self, window_size):
+        """维护最近 window_size 个值的滚动均值。"""
+        if _USE_RUST and hasattr(self._inner, "rolling_mean"):
+            try:
+                return Observable(self._inner.rolling_mean(window_size))
+            except Exception:
+                pass
+        return Observable(self._inner.rolling_mean(window_size))
+
+    # ---------- 累积变换 ----------
+    def cum_sum(self):
+        """每步累积求和。"""
+        if _USE_RUST and hasattr(self._inner, "cum_sum"):
+            try:
+                return Observable(self._inner.cum_sum())
+            except Exception:
+                pass
+        return Observable(self._inner.cum_sum())
+
+    def cum_min(self):
+        """每步累积最小值。"""
+        if _USE_RUST and hasattr(self._inner, "cum_min"):
+            try:
+                return Observable(self._inner.cum_min())
+            except Exception:
+                pass
+        return Observable(self._inner.cum_min())
+
+    def cum_max(self):
+        """每步累积最大值。"""
+        if _USE_RUST and hasattr(self._inner, "cum_max"):
+            try:
+                return Observable(self._inner.cum_max())
+            except Exception:
+                pass
+        return Observable(self._inner.cum_max())
+
+    def cum_mean(self):
+        """每步累积均值。"""
+        if _USE_RUST and hasattr(self._inner, "cum_mean"):
+            try:
+                return Observable(self._inner.cum_mean())
+            except Exception:
+                pass
+        return Observable(self._inner.cum_mean())
+
+    def cum_prod(self):
+        """每步累积乘积。"""
+        if _USE_RUST and hasattr(self._inner, "cum_prod"):
+            try:
+                return Observable(self._inner.cum_prod())
+            except Exception:
+                pass
+        return Observable(self._inner.cum_prod())
+
+    # ---------- 排序 Top-N ----------
+    def sort(self, key=None, reverse=False):
+        """收集全部值排序后发射（仅对有限流适用）。"""
+        if _USE_RUST and hasattr(self._inner, "sort"):
+            try:
+                return Observable(self._inner.sort(key, reverse))
+            except Exception:
+                pass
+        return Observable(self._inner.sort(key, reverse))
+
+    def top_k(self, k, key=None):
+        """返回前 k 个最大值（堆实现，节省内存）。"""
+        if _USE_RUST and hasattr(self._inner, "top_k"):
+            try:
+                return Observable(self._inner.top_k(k, key))
+            except Exception:
+                pass
+        return Observable(self._inner.top_k(k, key))
+
+    def bottom_k(self, k, key=None):
+        """返回最小的 k 个值（堆实现）。"""
+        if _USE_RUST and hasattr(self._inner, "bottom_k"):
+            try:
+                return Observable(self._inner.bottom_k(k, key))
+            except Exception:
+                pass
+        return Observable(self._inner.bottom_k(k, key))
+
+    # ---------- 过滤/选择算子 ----------
+    def distinct(self):
+        """去重：每个值只发射一次。"""
+        if _USE_RUST and hasattr(self._inner, "distinct"):
+            try:
+                return Observable(self._inner.distinct())
+            except Exception:
+                pass
+        return Observable(self._inner.distinct())
+
+    def element_at(self, idx):
+        """发射第 idx 个值（0-based）。越界不发射。"""
+        if _USE_RUST and hasattr(self._inner, "element_at"):
+            try:
+                return Observable(self._inner.element_at(idx))
+            except Exception:
+                pass
+        return Observable(self._inner.element_at(idx))
+
+    def take_while(self, predicate):
+        """满足谓词时取，遇到第一个不满足值即终止。"""
+        if _USE_RUST and hasattr(self._inner, "take_while"):
+            try:
+                return Observable(self._inner.take_while(predicate))
+            except Exception:
+                pass
+        return Observable(self._inner.take_while(predicate))
+
+    def skip_while(self, predicate):
+        """跳过满足谓词的值，直到第一个不满足后全部发射。"""
+        if _USE_RUST and hasattr(self._inner, "skip_while"):
+            try:
+                return Observable(self._inner.skip_while(predicate))
+            except Exception:
+                pass
+        return Observable(self._inner.skip_while(predicate))
+
+    def take_last(self, n):
+        """取最后 n 个值（需要缓冲）。"""
+        if _USE_RUST and hasattr(self._inner, "take_last"):
+            try:
+                return Observable(self._inner.take_last(n))
+            except Exception:
+                pass
+        return Observable(self._inner.take_last(n))
+
+    def skip_last(self, n):
+        """跳过最后 n 个值（需要缓冲）。"""
+        if _USE_RUST and hasattr(self._inner, "skip_last"):
+            try:
+                return Observable(self._inner.skip_last(n))
+            except Exception:
+                pass
+        return Observable(self._inner.skip_last(n))
+
+    # ---------- 组合算子 ----------
+    def switch_map(self, mapper):
+        """新值到来时取消前一个内层订阅，切换到新的 Observable。"""
+        if _USE_RUST and hasattr(self._inner, "switch_map"):
+            try:
+                return Observable(self._inner.switch_map(mapper))
+            except Exception:
+                pass
+        return Observable(self._inner.switch_map(mapper))
+
+    def combine_latest(self, other, combiner):
+        """两边都有过值后，任一方更新都发射最新组合。"""
+        if _USE_RUST and hasattr(self._inner, "combine_latest"):
+            try:
+                return Observable(self._inner.combine_latest(other, combiner))
+            except Exception:
+                pass
+        return Observable(self._inner.combine_latest(other, combiner))
+
+    # ---------- 错误处理 ----------
+    def catch_error(self, handler):
+        """异常时调用 handler(err) 返回新的 Observable 继续。"""
+        if _USE_RUST and hasattr(self._inner, "catch_error"):
+            try:
+                return Observable(self._inner.catch_error(handler))
+            except Exception:
+                pass
+        return Observable(self._inner.catch_error(handler))
+
+    def retry(self, count):
+        """失败时重试最多 count 次。"""
+        if _USE_RUST and hasattr(self._inner, "retry"):
+            try:
+                return Observable(self._inner.retry(count))
+            except Exception:
+                pass
+        return Observable(self._inner.retry(count))
+
+    def retry_with_delay(self, count, delay_seconds):
+        """失败后延迟 delay_seconds 再重试。"""
+        if _USE_RUST and hasattr(self._inner, "retry_with_delay"):
+            try:
+                return Observable(self._inner.retry_with_delay(count, delay_seconds))
+            except Exception:
+                pass
+        return Observable(self._inner.retry_with_delay(count, delay_seconds))
+
+    # ---------- 轻量过滤 ----------
+    def distinct_until_changed(self):
+        """只当值与上一个不同时才发射。"""
+        if _USE_RUST and hasattr(self._inner, "distinct_until_changed"):
+            try:
+                return Observable(self._inner.distinct_until_changed())
+            except Exception:
+                pass
+        return Observable(self._inner.distinct_until_changed())
+
+    def ignore_elements(self):
+        """不发射任何值，只转发完成信号。"""
+        if _USE_RUST and hasattr(self._inner, "ignore_elements"):
+            try:
+                return Observable(self._inner.ignore_elements())
+            except Exception:
+                pass
+        return Observable(self._inner.ignore_elements())
+
+    # ---------- 多播 share/publish ----------
+    def share(self):
+        """多个订阅者共享同一个源订阅。"""
+        if _USE_RUST and hasattr(self._inner, "share"):
+            try:
+                return Observable(self._inner.share())
+            except Exception:
+                pass
+        return Observable(self._inner.share())
+
+    def publish(self):
+        """publish：类似 share，但需要手动 connect()。简化版等同 share。"""
+        return self.share()
+
+    def dispatch_to_workers(self, fn=None, num_workers=4, buffer_size=0,
+                            on_drop=None, drop_strategy="oldest", **kwargs):
+        """按闲/忙状态分发到 worker 池（带并发上限的 flat_map）。
+
+        核心语义:
+          - 上游每个值 -> 找一个"空闲"的 worker -> 调用 ``fn(value)`` -> 结果发给下游
+          - worker "忙"期间不会再分配新值
+          - 所有 worker 都忙时: 新值进入缓冲队列
+          - 缓冲队列满时: 按 ``drop_strategy`` 丢弃（并调用 ``on_drop``）
+          - 结果按"先完成先发出"的顺序输出。
+
+        Args:
+            fn: 每个值的处理函数，支持同步函数
+            num_workers: 最大并发 worker 数，必须 >= 1（默认 4）
+            buffer_size: 缓冲队列大小，0 表示不限（可能导致内存无限增长）
+            on_drop: 值被丢弃时的回调，接收被丢弃的值作为唯一参数
+            drop_strategy: ``"oldest"`` 缓冲满时丢弃最旧的；
+                            ``"newest"`` 缓冲满时丢弃新来的
+
+        Returns:
+            Observable: 发射 fn 处理后的结果流
+        """
+        if _USE_RUST and hasattr(self._inner, "dispatch_to_workers"):
+            try:
+                return Observable(
+                    self._inner.dispatch_to_workers(
+                        fn=fn, num_workers=num_workers,
+                        buffer_size=buffer_size, on_drop=on_drop,
+                        drop_strategy=drop_strategy, **kwargs
+                    )
+                )
+            except Exception:
+                pass
+        return Observable(
+            self._inner.dispatch_to_workers(
+                fn=fn, num_workers=num_workers,
+                buffer_size=buffer_size, on_drop=on_drop,
+                drop_strategy=drop_strategy, **kwargs
+            )
+        )
+
+    def dispatch_workers(self, fn=None, num_workers=4, buffer_size=0,
+                        on_drop=None, drop_strategy="oldest", **kwargs):
+        """``dispatch_to_workers`` 的短别名。"""
+        return self.dispatch_to_workers(
+            fn=fn, num_workers=num_workers, buffer_size=buffer_size,
+            on_drop=on_drop, drop_strategy=drop_strategy, **kwargs
+        )
+
+    # ---------- None 处理 & 数学工具 ----------
+    def drop_none(self):
+        """过滤掉值为 None 的元素。"""
+        if _USE_RUST and hasattr(self._inner, "drop_none"):
+            try:
+                return Observable(self._inner.drop_none())
+            except Exception:
+                pass
+        return Observable(self._inner.drop_none())
+
+    def fill_none(self, default_value):
+        """将 None 替换为 default_value。"""
+        if _USE_RUST and hasattr(self._inner, "fill_none"):
+            try:
+                return Observable(self._inner.fill_none(default_value))
+            except Exception:
+                pass
+        return Observable(self._inner.fill_none(default_value))
+
+    def abs(self):
+        """对每个值取绝对值。"""
+        if _USE_RUST and hasattr(self._inner, "abs"):
+            try:
+                return Observable(self._inner.abs())
+            except Exception:
+                pass
+        return Observable(self._inner.abs())
+
+    def clamp(self, min_val, max_val):
+        """将值限制在 [min_val, max_val] 区间。"""
+        if _USE_RUST and hasattr(self._inner, "clamp"):
+            try:
+                return Observable(self._inner.clamp(min_val, max_val))
+            except Exception:
+                pass
+        return Observable(self._inner.clamp(min_val, max_val))
+
+    # ---------- 嵌套展开 ----------
+    def explode(self):
+        """Iterable 展开为逐个值发射；str/bytes 作为单个值。"""
+        if _USE_RUST and hasattr(self._inner, "explode"):
+            try:
+                return Observable(self._inner.explode())
+            except Exception:
+                pass
+        return Observable(self._inner.explode())
+
+    def flatten(self):
+        """同 explode()。展平嵌套序列。"""
+        return self.explode()
+
     def run(self):
         """订阅并消费所有值。"""
         if _USE_RUST and hasattr(self._inner, "run"):
@@ -1389,6 +2791,224 @@ class _OpModule:
     def do_on_next(action):
         return lambda obs: obs.do_on_next(action)
 
+    @staticmethod
+    def min():
+        return lambda obs: obs.min()
+
+    @staticmethod
+    def max():
+        return lambda obs: obs.max()
+
+    @staticmethod
+    def mean():
+        return lambda obs: obs.mean()
+
+    @staticmethod
+    def average():
+        return lambda obs: obs.average()
+
+    @staticmethod
+    def median():
+        return lambda obs: obs.median()
+
+    @staticmethod
+    def variance(ddof=0):
+        return lambda obs: obs.variance(ddof)
+
+    @staticmethod
+    def std(ddof=0):
+        return lambda obs: obs.std(ddof)
+
+    @staticmethod
+    def quantile(q):
+        return lambda obs: obs.quantile(q)
+
+    @staticmethod
+    def arg_min():
+        return lambda obs: obs.arg_min()
+
+    @staticmethod
+    def arg_max():
+        return lambda obs: obs.arg_max()
+
+    @staticmethod
+    def n_unique():
+        return lambda obs: obs.n_unique()
+
+    @staticmethod
+    def any_op(predicate):
+        return lambda obs: obs.any(predicate)
+
+    @staticmethod
+    def rolling_min(window_size):
+        return lambda obs: obs.rolling_min(window_size)
+
+    @staticmethod
+    def rolling_max(window_size):
+        return lambda obs: obs.rolling_max(window_size)
+
+    @staticmethod
+    def rolling_sum(window_size):
+        return lambda obs: obs.rolling_sum(window_size)
+
+    @staticmethod
+    def rolling_mean(window_size):
+        return lambda obs: obs.rolling_mean(window_size)
+
+    @staticmethod
+    def cum_sum():
+        return lambda obs: obs.cum_sum()
+
+    @staticmethod
+    def cum_min():
+        return lambda obs: obs.cum_min()
+
+    @staticmethod
+    def cum_max():
+        return lambda obs: obs.cum_max()
+
+    @staticmethod
+    def cum_mean():
+        return lambda obs: obs.cum_mean()
+
+    @staticmethod
+    def cum_prod():
+        return lambda obs: obs.cum_prod()
+
+    @staticmethod
+    def sort(key=None, reverse=False):
+        return lambda obs: obs.sort(key, reverse)
+
+    @staticmethod
+    def top_k(k, key=None):
+        return lambda obs: obs.top_k(k, key)
+
+    @staticmethod
+    def bottom_k(k, key=None):
+        return lambda obs: obs.bottom_k(k, key)
+
+    @staticmethod
+    def distinct():
+        return lambda obs: obs.distinct()
+
+    @staticmethod
+    def element_at(idx):
+        return lambda obs: obs.element_at(idx)
+
+    @staticmethod
+    def take_while(predicate):
+        return lambda obs: obs.take_while(predicate)
+
+    @staticmethod
+    def skip_while(predicate):
+        return lambda obs: obs.skip_while(predicate)
+
+    @staticmethod
+    def take_last(n):
+        return lambda obs: obs.take_last(n)
+
+    @staticmethod
+    def skip_last(n):
+        return lambda obs: obs.skip_last(n)
+
+    @staticmethod
+    def switch_map(mapper):
+        return lambda obs: obs.switch_map(mapper)
+
+    @staticmethod
+    def combine_latest(other, combiner):
+        return lambda obs: obs.combine_latest(other, combiner)
+
+    @staticmethod
+    def catch_error(handler):
+        return lambda obs: obs.catch_error(handler)
+
+    @staticmethod
+    def retry(count):
+        return lambda obs: obs.retry(count)
+
+    @staticmethod
+    def retry_with_delay(count, delay_seconds):
+        return lambda obs: obs.retry_with_delay(count, delay_seconds)
+
+    @staticmethod
+    def distinct_until_changed():
+        return lambda obs: obs.distinct_until_changed()
+
+    @staticmethod
+    def ignore_elements():
+        return lambda obs: obs.ignore_elements()
+
+    @staticmethod
+    def share():
+        return lambda obs: obs.share()
+
+    @staticmethod
+    def publish():
+        return lambda obs: obs.publish()
+
+    @staticmethod
+    def drop_none():
+        return lambda obs: obs.drop_none()
+
+    @staticmethod
+    def fill_none(default_value):
+        return lambda obs: obs.fill_none(default_value)
+
+    @staticmethod
+    def abs_op():
+        return lambda obs: obs.abs()
+
+    @staticmethod
+    def clamp(min_val, max_val):
+        return lambda obs: obs.clamp(min_val, max_val)
+
+    @staticmethod
+    def explode():
+        return lambda obs: obs.explode()
+
+    @staticmethod
+    def flatten():
+        return lambda obs: obs.flatten()
+
+    @staticmethod
+    def sum():
+        return lambda obs: obs.sum()
+
+    @staticmethod
+    def dispatch_to_workers(fn=None, num_workers=4, buffer_size=0,
+                            on_drop=None, drop_strategy="oldest", **kwargs):
+        return lambda obs: obs.dispatch_to_workers(
+            fn=fn, num_workers=num_workers, buffer_size=buffer_size,
+            on_drop=on_drop, drop_strategy=drop_strategy, **kwargs
+        )
+
+    @staticmethod
+    def dispatch_workers(fn=None, num_workers=4, buffer_size=0,
+                        on_drop=None, drop_strategy="oldest", **kwargs):
+        return lambda obs: obs.dispatch_workers(
+            fn=fn, num_workers=num_workers, buffer_size=buffer_size,
+            on_drop=on_drop, drop_strategy=drop_strategy, **kwargs
+        )
+
+    @staticmethod
+    def write_to_clipboard(dispatcher, source=None):
+        """响应式操作符：把上游每一项写回剪贴板，并继续下发 ClipData。"""
+        from .clipboard import write_to_clipboard as _wtc
+        return _wtc(dispatcher, source=source)
+
+    @staticmethod
+    def write_to_filesystem(dispatcher, mode="create"):
+        """响应式操作符：把上游每一项写入文件系统，并继续下发 FileData。"""
+        from .file_watcher import write_to_filesystem as _wtfs
+        return _wtfs(dispatcher, mode=mode)
+
+    @staticmethod
+    def write_to_foldersystem(dispatcher, mode="create"):
+        """响应式操作符：把上游每一项写入目录系统，并继续下发 FolderData。"""
+        from .folder_watcher import write_to_foldersystem as _wtfs2
+        return _wtfs2(dispatcher, mode=mode)
+
 
 ops = _OpModule()
 
@@ -1396,6 +3016,58 @@ ops = _OpModule()
 # ============================================================================
 # 导出符号
 # ============================================================================
+
+# 剪贴板响应式模块
+from .clipboard import (
+    ChangeType,
+    ClipData,
+    ClipboardDispatcher,
+    ClipSubject,
+    ClipObserver,
+    from_clipboard,
+    write_to_clipboard,
+)
+
+# 文件系统监控模块
+from .file_watcher import (
+    FileChangeType,
+    FileData,
+    FileDispatcher,
+    FileSubject,
+    FileObserver,
+    from_filesystem,
+    write_to_filesystem,
+)
+
+# 目录系统监控模块（子系统级）
+from .folder_watcher import (
+    FolderChangeType,
+    FolderData,
+    FolderDispatcher,
+    FolderSubject,
+    FolderObserver,
+    from_foldersystem,
+    write_to_foldersystem,
+)
+
+# 键盘鼠标响应式模块
+from .keyboard_mouse import (
+    KeyEventType,
+    KeyData,
+    MouseEventType,
+    MouseData,
+    KeyModifier,
+    KeyboardDispatcher,
+    MouseDispatcher,
+    KeySubject,
+    MouseSubject,
+    KeyObserver,
+    MouseObserver,
+    from_keyboard,
+    from_mouse,
+    write_to_keyboard,
+    write_to_mouse,
+)
 
 __all__ = [
     "Observable",
@@ -1409,4 +3081,41 @@ __all__ = [
     "AsyncScheduler",
     "ImmediateScheduler",
     "ops",
+    "ChangeType",
+    "ClipData",
+    "ClipboardDispatcher",
+    "ClipSubject",
+    "ClipObserver",
+    "from_clipboard",
+    "write_to_clipboard",
+    "FileChangeType",
+    "FileData",
+    "FileDispatcher",
+    "FileSubject",
+    "FileObserver",
+    "from_filesystem",
+    "write_to_filesystem",
+    "FolderChangeType",
+    "FolderData",
+    "FolderDispatcher",
+    "FolderSubject",
+    "FolderObserver",
+    "from_foldersystem",
+    "write_to_foldersystem",
+    # 键盘鼠标
+    "KeyEventType",
+    "KeyData",
+    "MouseEventType",
+    "MouseData",
+    "KeyModifier",
+    "KeyboardDispatcher",
+    "MouseDispatcher",
+    "KeySubject",
+    "MouseSubject",
+    "KeyObserver",
+    "MouseObserver",
+    "from_keyboard",
+    "from_mouse",
+    "write_to_keyboard",
+    "write_to_mouse",
 ]

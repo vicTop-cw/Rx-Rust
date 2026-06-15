@@ -2,6 +2,16 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::sync::{Arc, Mutex};
 
+mod file_watcher;
+use file_watcher::*;
+
+mod folder_watcher;
+use folder_watcher::*;
+
+pub mod clipboard;
+
+pub mod keyboard_mouse;
+
 // ============================================================================
 // Subscription - 订阅句柄
 // ============================================================================
@@ -58,6 +68,25 @@ impl Observable {
 #[pymethods]
 impl Observable {
     // ---------- 工厂方法 ----------
+
+    #[staticmethod]
+    fn from_subscribe_fn(py: Python<'_>, fn_obj: PyObject) -> PyResult<Self> {
+        // 将 Python callable 包装为 SubscribeFn：(observer) -> subscription
+        let fn_handle = fn_obj.clone_ref(py);
+        Ok(Self::new_impl(move |observer: PyObject| {
+            Python::with_gil(|py| {
+                match fn_handle.call1(py, (observer,)) {
+                    Ok(ret) => {
+                        if let Ok(sub) = ret.extract::<Py<Subscription>>(py) {
+                            return sub;
+                        }
+                        Py::new(py, Subscription::new()).unwrap()
+                    }
+                    Err(_) => Py::new(py, Subscription::new()).unwrap(),
+                }
+            })
+        }))
+    }
 
     #[staticmethod]
     fn of(value: PyObject) -> Self {
@@ -934,5 +963,9 @@ fn rx_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThreadPoolScheduler>()?;
     m.add_class::<AsyncScheduler>()?;
     m.add_class::<ImmediateScheduler>()?;
+    add_file_watcher_to_module(m)?;
+    crate::clipboard::toplevel::register_clipboard_module(m)?;
+    crate::keyboard_mouse::toplevel::register_keyboard_mouse_module(m)?;
+    add_folder_watcher_to_module(m)?;
     Ok(())
 }

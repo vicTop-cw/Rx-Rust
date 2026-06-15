@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["rust_test_proj",
     "rx-rust",
 ]
 resolver = "2"
