@@ -2,15 +2,15 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::sync::{Arc, Mutex};
 
-mod file_watcher;
-use file_watcher::*;
+// mod file_watcher;
+// use file_watcher::*;
 
-mod folder_watcher;
-use folder_watcher::*;
+// mod folder_watcher;
+// use folder_watcher::*;
 
-pub mod clipboard;
+// pub mod clipboard;
 
-pub mod keyboard_mouse;
+// pub mod keyboard_mouse;
 
 // ============================================================================
 // Subscription - 订阅句柄
@@ -154,7 +154,8 @@ impl Observable {
 
     // ---------- 订阅方法 ----------
 
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
+    #[pyo3(signature = (on_next, on_error=None, on_completed=None))]
+    fn subscribe(&self, on_next: PyObject, on_error: Option<PyObject>, on_completed: Option<PyObject>) -> Py<Subscription> {
         (self.subscribe_fn)(on_next)
     }
 
@@ -208,10 +209,10 @@ impl Observable {
                 let downstream_clone = downstream_observer.clone_ref(py);
                 let wrapped = RustObserver::new(move |py, value| {
                     let inner = mapper_clone.call1(py, (value,)).unwrap();
-                    if let Ok(iter) = inner.call_method0(py, "__iter__") {
-                        for item in iter.iter(py).unwrap() {
-                            let item = item.unwrap().unbind();
-                            let _ = downstream_clone.call1(py, (item,));
+                    if let Ok(iter_obj) = inner.call_method0(py, "__iter__") {
+                        let iter_bound = iter_obj.bind(py);
+                        while let Ok(next_item) = iter_bound.call_method0("__next__") {
+                            let _ = downstream_clone.call1(py, (next_item.unbind(),));
                         }
                     }
                     Ok(())
@@ -225,23 +226,19 @@ impl Observable {
     fn scan(&self, initial: PyObject, scanner: PyObject) -> Self {
         let source_fn = self.subscribe_fn.clone();
         Self::new_impl(move |downstream_observer| {
-            let accumulator = Arc::new(Mutex::new(None::<PyObject>));
-            {
-                let init_clone = initial.clone();
-                *accumulator.lock().unwrap() = Some(init_clone);
-            }
+            let accumulator: Arc<Mutex<Option<PyObject>>> = Arc::new(Mutex::new(None));
             Python::with_gil(|py| {
+                *accumulator.lock().unwrap() = Some(initial.clone_ref(py));
                 let accumulator_clone = accumulator.clone();
                 let scanner_clone = scanner.clone_ref(py);
                 let downstream_clone = downstream_observer.clone_ref(py);
                 let wrapped = RustObserver::new(move |py, value| {
-                    let acc_opt = accumulator_clone.lock().unwrap().clone();
-                    if let Some(acc) = acc_opt {
+                    let mut acc_guard = accumulator_clone.lock().unwrap();
+                    if let Some(ref acc) = *acc_guard {
                         let new_acc = scanner_clone
                             .call1(py, (acc.clone_ref(py), value.clone_ref(py)))
                             .unwrap();
-                        let _ = downstream_clone.call1(py, (new_acc.clone_ref(py),));
-                        *accumulator_clone.lock().unwrap() = Some(new_acc);
+                        *acc_guard = Some(new_acc);
                     }
                     Ok(())
                 });
@@ -382,17 +379,18 @@ impl Observable {
     fn reduce(&self, initial: PyObject, reducer: PyObject) -> Self {
         let source_fn = self.subscribe_fn.clone();
         Self::new_impl(move |downstream_observer| {
-            let accumulator = Arc::new(Mutex::new(Some(initial.clone())));
+            let accumulator: Arc<Mutex<Option<PyObject>>> = Arc::new(Mutex::new(None));
             Python::with_gil(|py| {
+                *accumulator.lock().unwrap() = Some(initial.clone_ref(py));
                 let accumulator_clone = accumulator.clone();
                 let reducer_clone = reducer.clone_ref(py);
                 let wrapped = RustObserver::new(move |py, value| {
-                    let acc_opt = accumulator_clone.lock().unwrap().clone();
-                    if let Some(acc) = acc_opt {
+                    let mut acc_guard = accumulator_clone.lock().unwrap();
+                    if let Some(ref acc) = *acc_guard {
                         let new_acc = reducer_clone
                             .call1(py, (acc.clone_ref(py), value.clone_ref(py)))
                             .unwrap();
-                        *accumulator_clone.lock().unwrap() = Some(new_acc);
+                        *acc_guard = Some(new_acc);
                     }
                     Ok(())
                 });
@@ -672,7 +670,7 @@ impl PublishSubject {
                 }
             }
             // 事后清理：从列表中移除已 disposed 的观察者
-            self.observers.lock().unwrap().retain(|_, flag, _| !*flag.lock().unwrap());
+            self.observers.lock().unwrap().retain(|obs| !*obs.1.lock().unwrap());
         })
     }
 
@@ -680,7 +678,8 @@ impl PublishSubject {
         self.observers.lock().unwrap().clear();
     }
 
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
+    #[pyo3(signature = (on_next, on_error=None, on_completed=None))]
+    fn subscribe(&self, on_next: PyObject, on_error: Option<PyObject>, on_completed: Option<PyObject>) -> Py<Subscription> {
         Python::with_gil(|py| {
             let mut id = self.next_id.lock().unwrap();
             let my_id = *id;
@@ -736,7 +735,7 @@ impl BehaviorSubject {
                     let _ = cb.call1(py, (value.clone_ref(py),));
                 }
             }
-            self.observers.lock().unwrap().retain(|_, flag, _| !*flag.lock().unwrap());
+            self.observers.lock().unwrap().retain(|obs| !*obs.1.lock().unwrap());
         })
     }
 
@@ -744,7 +743,8 @@ impl BehaviorSubject {
         self.observers.lock().unwrap().clear();
     }
 
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
+    #[pyo3(signature = (on_next, on_error=None, on_completed=None))]
+    fn subscribe(&self, on_next: PyObject, on_error: Option<PyObject>, on_completed: Option<PyObject>) -> Py<Subscription> {
         Python::with_gil(|py| {
             let mut id = self.next_id.lock().unwrap();
             let my_id = *id;
@@ -815,7 +815,7 @@ impl ReplaySubject {
                     let _ = cb.call1(py, (value.clone_ref(py),));
                 }
             }
-            self.observers.lock().unwrap().retain(|_, flag, _| !*flag.lock().unwrap());
+            self.observers.lock().unwrap().retain(|obs| !*obs.1.lock().unwrap());
         })
     }
 
@@ -823,7 +823,8 @@ impl ReplaySubject {
         self.observers.lock().unwrap().clear();
     }
 
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
+    #[pyo3(signature = (on_next, on_error=None, on_completed=None))]
+    fn subscribe(&self, on_next: PyObject, on_error: Option<PyObject>, on_completed: Option<PyObject>) -> Py<Subscription> {
         Python::with_gil(|py| {
             let mut id = self.next_id.lock().unwrap();
             let my_id = *id;
@@ -963,9 +964,9 @@ fn rx_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThreadPoolScheduler>()?;
     m.add_class::<AsyncScheduler>()?;
     m.add_class::<ImmediateScheduler>()?;
-    add_file_watcher_to_module(m)?;
-    crate::clipboard::toplevel::register_clipboard_module(m)?;
-    crate::keyboard_mouse::toplevel::register_keyboard_mouse_module(m)?;
-    add_folder_watcher_to_module(m)?;
+    // add_file_watcher_to_module(m)?;
+    // crate::clipboard::toplevel::register_clipboard_module(m)?;
+    // crate::keyboard_mouse::toplevel::register_keyboard_mouse_module(m)?;
+    // add_folder_watcher_to_module(m)?;
     Ok(())
 }

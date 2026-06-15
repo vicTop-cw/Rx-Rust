@@ -848,7 +848,7 @@ pub struct FolderSubject {
 #[pymethods]
 impl FolderSubject {
     #[new]
-    #[pyo3(signature = (paths=None, backend="auto", change_types=None, tags=None, interval=0.5, auto_start=true))]
+    #[pyo3(signature = (paths=None, backend="auto", change_types=None, _tags=None, interval=0.5, auto_start=true))]
     fn new(
         paths: Option<Vec<String>>,
         backend: &str,

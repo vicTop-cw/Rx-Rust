@@ -1,0 +1,27 @@
+import os
+
+content = """FROM python:3.13-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+ENV PYO3_PYTHON=/usr/local/bin/python3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    curl ca-certificates build-essential pkg-config libssl-dev \\
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
+RUN pip install --no-cache-dir maturin pytest
+
+WORKDIR /workspace
+
+CMD ["bash"]
+"""
+
+path = r'E:\IDEProjects\AI\Rx-Rust\dev-tools\Dockerfile.maturin'
+with open(path, 'w', newline='\n') as f:
+    f.write(content)
+print(f'Written {len(content)} bytes to {path}')

@@ -660,23 +660,4 @@ pub mod win32 {
 // 导出
 // =====================================================================
 
-pub use self::keyboard::{KeyboardBackend, PollingKeyboardBackend};
-pub use self::mouse::{MouseBackend, PollingMouseBackend};
-pub use self::raw::{RawKeyEvent, RawMouseEvent};
-pub use self::win32::{Win32KeyboardBackend, Win32MouseBackend};
-
-// 内部子模块
-mod raw {
-    pub use super::RawKeyEvent;
-    pub use super::RawMouseEvent;
-}
-
-mod keyboard {
-    pub use super::KeyboardBackend;
-    pub use super::PollingKeyboardBackend;
-}
-
-mod mouse {
-    pub use super::MouseBackend;
-    pub use super::PollingMouseBackend;
-}
+// 导出（在模块根级别定义，无需 re-export）

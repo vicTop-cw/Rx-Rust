@@ -75,7 +75,7 @@ pub struct WriteKeyboardOp {
 impl WriteKeyboardOp {
     fn __call__(&self, py: Python<'_>, source: PyObject) -> PyResult<WriteKeyboardObs> {
         let obs = WriteKeyboardObs {
-            source: Py::new(py, source)?,
+            source,
             dispatcher: self.dispatcher.clone_ref(py),
         };
         Ok(obs)
@@ -85,7 +85,7 @@ impl WriteKeyboardOp {
 /// WriteKeyboardObs：包装上游 Observable，实现 subscribe 方法
 #[pyclass(name = "_WriteKeyboardObservable")]
 pub struct WriteKeyboardObs {
-    source: Py<PyAny>,
+    source: PyObject,
     dispatcher: Py<KeyboardDispatcher>,
 }
 
@@ -93,19 +93,20 @@ pub struct WriteKeyboardObs {
 impl WriteKeyboardObs {
     fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         let handler = WriteKeyboardHandler {
-            downstream: Py::new(py, on_next)?,
+            downstream: on_next,
             dispatcher: self.dispatcher.clone_ref(py),
         };
         let handler_py = Py::new(py, handler)?.into_any();
         let source_ref = self.source.bind(py);
-        source_ref.call_method1("subscribe", (handler_py,))
+        let result = source_ref.call_method1("subscribe", (handler_py,))?;
+        Ok(result.into_gil_ref().unbind())
     }
 }
 
 /// WriteKeyboardHandler：处理每个值，写入键盘事件后透传给下游
 #[pyclass(name = "_WriteKeyboardHandler")]
 pub struct WriteKeyboardHandler {
-    downstream: Py<PyAny>,
+    downstream: PyObject,
     dispatcher: Py<KeyboardDispatcher>,
 }
 
@@ -155,7 +156,7 @@ impl WriteKeyboardHandler {
 
             // 优先取 text
             if let Ok(Some(text)) = dict_b.get_item("text") {
-                let t: String = text.extract(py)?;
+                let t: String = text.extract()?;
                 disp.call_method1("type_text", (t.as_str(),))?;
                 let _ = self.downstream.call1(py, (item,));
                 return Ok(());
@@ -163,9 +164,9 @@ impl WriteKeyboardHandler {
 
             // 取 key
             if let Ok(Some(key)) = dict_b.get_item("key") {
-                let k: String = key.extract(py)?;
+                let k: String = key.extract()?;
                 if let Ok(Some(is_press)) = dict_b.get_item("is_press") {
-                    let press: bool = is_press.extract(py)?;
+                    let press: bool = is_press.extract()?;
                     if press {
                         disp.call_method1("press", (&k,))?;
                     } else {
@@ -182,10 +183,10 @@ impl WriteKeyboardHandler {
 
             // 取 key_code
             if let Ok(Some(key_code_val)) = dict_b.get_item("key_code") {
-                let key_code: u32 = key_code_val.extract(py)?;
+                let key_code: u32 = key_code_val.extract()?;
                 let key_name = format!("VK_0x{:02X}", key_code);
                 if let Ok(Some(is_press_val)) = dict_b.get_item("is_press") {
-                    let is_press: bool = is_press_val.extract(py)?;
+                    let is_press: bool = is_press_val.extract()?;
                     if is_press {
                         disp.call_method1("press", (&key_name,))?;
                     } else {
@@ -220,7 +221,7 @@ pub struct WriteMouseOp {
 impl WriteMouseOp {
     fn __call__(&self, py: Python<'_>, source: PyObject) -> PyResult<WriteMouseObs> {
         let obs = WriteMouseObs {
-            source: Py::new(py, source)?,
+            source,
             dispatcher: self.dispatcher.clone_ref(py),
         };
         Ok(obs)
@@ -230,7 +231,7 @@ impl WriteMouseOp {
 /// WriteMouseObs：包装上游 Observable，实现 subscribe 方法
 #[pyclass(name = "_WriteMouseObservable")]
 pub struct WriteMouseObs {
-    source: Py<PyAny>,
+    source: PyObject,
     dispatcher: Py<MouseDispatcher>,
 }
 
@@ -238,19 +239,20 @@ pub struct WriteMouseObs {
 impl WriteMouseObs {
     fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         let handler = WriteMouseHandler {
-            downstream: Py::new(py, on_next)?,
+            downstream: on_next,
             dispatcher: self.dispatcher.clone_ref(py),
         };
         let handler_py = Py::new(py, handler)?.into_any();
         let source_ref = self.source.bind(py);
-        source_ref.call_method1("subscribe", (handler_py,))
+        let result = source_ref.call_method1("subscribe", (handler_py,))?;
+        Ok(result.into_gil_ref().unbind())
     }
 }
 
 /// WriteMouseHandler：处理每个值，执行鼠标操作后透传给下游
 #[pyclass(name = "_WriteMouseHandler")]
 pub struct WriteMouseHandler {
-    downstream: Py<PyAny>,
+    downstream: PyObject,
     dispatcher: Py<MouseDispatcher>,
 }
 
@@ -348,13 +350,13 @@ impl WriteMouseHandler {
             let dict_b = dict.bind(py);
 
             // 获取 x, y
-            let x: i32 = dict_b.get_item("x")?.map_or(Ok(0), |v| v.extract(py))?;
-            let y: i32 = dict_b.get_item("y")?.map_or(Ok(0), |v| v.extract(py))?;
+            let x: i32 = dict_b.get_item("x")?.map_or(Ok(0), |v| v.extract())?;
+            let y: i32 = dict_b.get_item("y")?.map_or(Ok(0), |v| v.extract())?;
 
             // 获取 event_type，默认为 "move"
             let event_str: String = dict_b
                 .get_item("event")?
-                .map_or(Ok("move".to_string()), |v| v.extract(py))?;
+                .map_or(Ok("move".to_string()), |v| v.extract())?;
             let event_str_lower = event_str.to_lowercase();
 
             match event_str_lower.as_str() {
@@ -364,7 +366,7 @@ impl WriteMouseHandler {
                 "click" | "left" | "left_click" => {
                     let button: String = dict_b
                         .get_item("button")?
-                        .map_or(Ok("left".to_string()), |v| v.extract(py))?;
+                        .map_or(Ok("left".to_string()), |v| v.extract())?;
                     disp.call_method1("move_to", (x, y))?;
                     disp.call_method1("click", (&button,))?;
                 }
@@ -379,19 +381,19 @@ impl WriteMouseHandler {
                 "scroll" => {
                     let delta: i32 = dict_b
                         .get_item("delta")?
-                        .map_or(Ok(120), |v| v.extract(py))?;
+                        .map_or(Ok(120), |v| v.extract())?;
                     disp.call_method1("scroll", (delta,))?;
                 }
                 "drag" => {
                     // drag 需要 from_x, from_y, to_x, to_to
                     let from_x: i32 = dict_b
                         .get_item("from_x")?
-                        .map_or(Ok(x), |v| v.extract(py))?;
+                        .map_or(Ok(x), |v| v.extract())?;
                     let from_y: i32 = dict_b
                         .get_item("from_y")?
-                        .map_or(Ok(y), |v| v.extract(py))?;
-                    let to_x: i32 = dict_b.get_item("to_x")?.map_or(Ok(x), |v| v.extract(py))?;
-                    let to_y: i32 = dict_b.get_item("to_y")?.map_or(Ok(y), |v| v.extract(py))?;
+                        .map_or(Ok(y), |v| v.extract())?;
+                    let to_x: i32 = dict_b.get_item("to_x")?.map_or(Ok(x), |v| v.extract())?;
+                    let to_y: i32 = dict_b.get_item("to_y")?.map_or(Ok(y), |v| v.extract())?;
                     disp.call_method1("drag", (from_x, from_y, to_x, to_y))?;
                 }
                 _ => {}

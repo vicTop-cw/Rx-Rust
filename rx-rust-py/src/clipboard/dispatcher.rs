@@ -41,7 +41,7 @@ pub struct ClipboardDispatcher {
 #[pymethods]
 impl ClipboardDispatcher {
     #[new]
-    #[pyo3(signature = (interval=0.2, backend="auto".to_string(), _change_types=None, tags=None, filter_self=true, self_filter=None, self_source=None, self_signature_cap=32, on_change_data=None))]
+    #[pyo3(signature = (interval=0.2, backend="auto".to_string(), _change_types=None, tags=None, filter_self=true, _self_filter=None, self_source=None, self_signature_cap=32, on_change_data=None))]
     fn new(
         py: Python<'_>,
         interval: f64,

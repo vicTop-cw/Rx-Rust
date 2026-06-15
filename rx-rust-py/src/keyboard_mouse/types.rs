@@ -22,10 +22,6 @@ fn next_sequence() -> u64 {
 pub struct KeyEventType(pub u8);
 
 impl KeyEventType {
-    pub const KEY_DOWN: u8 = 0;
-    pub const KEY_UP: u8 = 1;
-    pub const KEY_HOLD: u8 = 2;
-
     pub fn to_name(&self) -> &'static str {
         match self.0 {
             0 => "KEY_DOWN",
@@ -64,20 +60,12 @@ impl KeyEventType {
 
     fn __eq__(&self, other: PyObject, py: Python<'_>) -> PyObject {
         if let Ok(val) = other.extract::<u8>(py) {
-            return (self.0 == val)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == val).to_object(py).into_any();
         }
         if let Ok(kt) = other.extract::<PyRef<KeyEventType>>(py) {
-            return (self.0 == kt.0)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == kt.0).to_object(py).into_any();
         }
-        false.into_pyobject(py).unwrap().unbind().into_any()
+        false.to_object(py).into_any()
     }
 }
 
@@ -90,16 +78,6 @@ impl KeyEventType {
 pub struct MouseEventType(pub u8);
 
 impl MouseEventType {
-    pub const MOVE: u8 = 0;
-    pub const LEFT_DOWN: u8 = 1;
-    pub const LEFT_UP: u8 = 2;
-    pub const RIGHT_DOWN: u8 = 3;
-    pub const RIGHT_UP: u8 = 4;
-    pub const MIDDLE_DOWN: u8 = 5;
-    pub const MIDDLE_UP: u8 = 6;
-    pub const SCROLL: u8 = 7;
-    pub const DRAG: u8 = 8;
-
     pub fn to_name(&self) -> &'static str {
         match self.0 {
             0 => "MOVE",
@@ -156,20 +134,12 @@ impl MouseEventType {
 
     fn __eq__(&self, other: PyObject, py: Python<'_>) -> PyObject {
         if let Ok(val) = other.extract::<u8>(py) {
-            return (self.0 == val)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == val).to_object(py).into_any();
         }
         if let Ok(mt) = other.extract::<PyRef<MouseEventType>>(py) {
-            return (self.0 == mt.0)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == mt.0).to_object(py).into_any();
         }
-        false.into_pyobject(py).unwrap().unbind().into_any()
+        false.to_object(py).into_any()
     }
 }
 
@@ -241,20 +211,12 @@ impl KeyModifier {
 
     fn __eq__(&self, other: PyObject, py: Python<'_>) -> PyObject {
         if let Ok(val) = other.extract::<i32>(py) {
-            return (self.0 == val)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == val).to_object(py).into_any();
         }
         if let Ok(km) = other.extract::<PyRef<KeyModifier>>(py) {
-            return (self.0 == km.0)
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any();
+            return (self.0 == km.0).to_object(py).into_any();
         }
-        false.into_pyobject(py).unwrap().unbind().into_any()
+        false.to_object(py).into_any()
     }
 
     // 位运算：或
@@ -268,10 +230,7 @@ impl KeyModifier {
                 "KeyModifier.__or__ requires KeyModifier or int",
             ));
         };
-        Ok(KeyModifier(self.0 | other_val)
-            .into_pyobject(py)
-            .unwrap()
-            .unbind())
+        Ok((self.0 | other_val).to_object(py).into_any())
     }
 
     // 位运算：与
@@ -285,10 +244,7 @@ impl KeyModifier {
                 "KeyModifier.__and__ requires KeyModifier or int",
             ));
         };
-        Ok(KeyModifier(self.0 & other_val)
-            .into_pyobject(py)
-            .unwrap()
-            .unbind())
+        Ok((self.0 & other_val).to_object(py).into_any())
     }
 }
 
@@ -320,10 +276,10 @@ pub struct KeyData {
 #[pymethods]
 impl KeyData {
     #[new]
-    #[pyo3(signature = (key_code, key_name="", is_press=true, event_type=None, modifiers=0, timestamp=None, sequence=None, window_title=None))]
+    #[pyo3(signature = (key_code, key_name=None, is_press=true, event_type=None, modifiers=0, timestamp=None, sequence=None, window_title=None))]
     fn new(
         key_code: u32,
-        key_name: String,
+        key_name: Option<String>,
         is_press: bool,
         event_type: Option<KeyEventType>,
         modifiers: i32,
@@ -331,10 +287,9 @@ impl KeyData {
         sequence: Option<u64>,
         window_title: Option<String>,
     ) -> Self {
-        let key_name = if key_name.is_empty() {
-            key_code_to_name(key_code).to_string()
-        } else {
-            key_name
+        let key_name = match key_name {
+            Some(s) if !s.is_empty() => s,
+            _ => key_code_to_name(key_code),
         };
         let ts = timestamp.unwrap_or_else(|| {
             SystemTime::now()
@@ -414,7 +369,7 @@ impl KeyData {
         let key_code: u32 = data.get_item("key_code")?.map_or(Ok(0), |v| v.extract())?;
         let key_name: String = data
             .get_item("key_name")?
-            .map_or(Ok(String::new()), |v| v.extract())?;
+            .map_or(Ok(String::new()), |v| v.extract::<String>())?;
         let is_press: bool = data
             .get_item("is_press")?
             .map_or(Ok(false), |v| v.extract())?;
@@ -535,16 +490,17 @@ pub struct MouseData {
 #[pymethods]
 impl MouseData {
     #[new]
-    #[pyo3(signature = (x, y, event_type, button="left", delta=0, timestamp=None, sequence=None))]
+    #[pyo3(signature = (x, y, event_type, button=None, delta=0, timestamp=None, sequence=None))]
     fn new(
         x: i32,
         y: i32,
         event_type: u8,
-        button: String,
+        button: Option<String>,
         delta: i32,
         timestamp: Option<i64>,
         sequence: Option<u64>,
     ) -> Self {
+        let button = button.unwrap_or_else(|| "left".to_string());
         let ts = timestamp.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -563,8 +519,9 @@ impl MouseData {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (x, y, event_type, button="left", delta=0))]
-    fn now(x: i32, y: i32, event_type: u8, button: String, delta: i32) -> Self {
+    #[pyo3(signature = (x, y, event_type, button=None, delta=0))]
+    fn now(x: i32, y: i32, event_type: u8, button: Option<String>, delta: i32) -> Self {
+        let button = button.unwrap_or_else(|| "left".to_string());
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -601,7 +558,7 @@ impl MouseData {
             .map_or(Ok(0), |v| v.extract())?;
         let button: String = data
             .get_item("button")?
-            .map_or(Ok(String::from("left")), |v| v.extract())?;
+            .map_or(Ok(String::from("left")), |v| v.extract::<String>())?;
         let delta: i32 = data.get_item("delta")?.map_or(Ok(0), |v| v.extract())?;
         let timestamp: i64 = data.get_item("timestamp")?.map_or_else(
             || {
@@ -828,15 +785,15 @@ pub fn key_code_to_name(code: u32) -> String {
 pub fn name_to_key_code(name: &str) -> Option<u32> {
     // 先尝试精确匹配
     for (vk, n) in VK_NAMES {
-        if n == name {
-            return Some(vk);
+        if *n == name {
+            return Some(*vk);
         }
     }
     // 尝试大小写不敏感匹配
     let name_upper = name.to_uppercase();
     for (vk, n) in VK_NAMES {
         if n.to_uppercase() == name_upper {
-            return Some(vk);
+            return Some(*vk);
         }
     }
     // 尝试 VK_0xXX 格式
@@ -849,11 +806,5 @@ pub fn name_to_key_code(name: &str) -> Option<u32> {
 }
 
 // ============================================================================
-// 导出
+// 导出（在模块根级别已定义）
 // ============================================================================
-
-pub use KeyData;
-pub use KeyEventType;
-pub use KeyModifier;
-pub use MouseData;
-pub use MouseEventType;
