@@ -18,10 +18,12 @@ test_keyboard_mouse.py - 键鼠操作模块集成测试
 """
 
 import sys
+import os
 import time
 import unittest
 
-# 优先使用 Rust 扩展
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rx-rust-py", "python"))
+
 USE_RUST = False
 try:
     from rx_rust import (
@@ -247,7 +249,6 @@ class TestSimulation(unittest.TestCase):
         kbd = KeyboardDispatcher(backend="polling")
         try:
             kbd.start()
-            # type_text 即使无焦点也不应抛异常
             kbd.type_text("hello")
         except Exception as e:
             self.fail(f"type_text 抛异常: {e}")
@@ -393,11 +394,6 @@ class TestWriteOperators(unittest.TestCase):
             self.skipTest("Rust 扩展未安装")
 
 
-# ============================================================================
-# 新增 API 测试
-# ============================================================================
-
-
 class TestKeyDataNewFields(unittest.TestCase):
     """测试 KeyData 新字段"""
 
@@ -417,7 +413,6 @@ class TestKeyDataNewFields(unittest.TestCase):
     def test_timestamp_milliseconds(self):
         """KeyData timestamp 是毫秒"""
         fd = KeyData(key_code=65, is_press=True)
-        # 毫秒应该是 > 1700000000000 (2023年后)
         self.assertGreater(fd.timestamp, 1700000000000)
 
     def test_to_dict_new_fields(self):
@@ -616,10 +611,6 @@ class TestPickleSerialization(unittest.TestCase):
             self.skipTest("pickle 方法未实现")
 
 
-# ============================================================================
-# 主入口
-# ============================================================================
-
 if __name__ == "__main__":
     print("=" * 60)
     print("rx_rust.keyboard_mouse 集成测试")
@@ -629,14 +620,12 @@ if __name__ == "__main__":
         print("\n[WARNING] Rust 扩展未加载，部分测试将被跳过")
         print("[HINT]  运行 `maturin develop` 或 `pip install .` 安装 Rust 扩展\n")
 
-    # 运行测试
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromModule(sys.modules[__name__])
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
 
-    # 总结
     print("\n" + "=" * 60)
     if result.wasSuccessful():
         print("[PASS] 所有测试通过!")

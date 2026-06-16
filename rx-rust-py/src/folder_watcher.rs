@@ -21,7 +21,7 @@ use notify::{
     RecommendedWatcher, RecursiveMode, Watcher,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,14 +37,6 @@ use std::time::Instant;
 pub struct FolderChangeType(pub u32);
 
 impl FolderChangeType {
-    pub const CREATED: u32 = 0;
-    pub const DELETED: u32 = 1;
-    pub const RENAMED: u32 = 2;
-    pub const MOVED_IN: u32 = 3;
-    pub const MOVED_OUT: u32 = 4;
-    pub const ATTRIB: u32 = 5;
-    pub const CONTENT: u32 = 6;
-
     pub fn to_name(ct: u32) -> &'static str {
         match ct {
             0 => "CREATED",
@@ -95,12 +87,12 @@ impl FolderChangeType {
 
     fn __eq__(&self, other: PyObject, py: Python<'_>) -> PyObject {
         if let Ok(val) = other.extract::<u32>(py) {
-            return (self.0 == val).into_pyobject(py).unwrap().unbind().into_any();
+            return (self.0 == val).to_object(py).into_any();
         }
         if let Ok(ft) = other.extract::<PyRef<FolderChangeType>>(py) {
-            return (self.0 == ft.0).into_pyobject(py).unwrap().unbind().into_any();
+            return (self.0 == ft.0).to_object(py).into_any();
         }
-        false.into_pyobject(py).unwrap().unbind().into_any()
+        false.to_object(py).into_any()
     }
 }
 
@@ -329,6 +321,7 @@ fn map_folder_event_kind_to_change_type(kind: EventKind) -> u32 {
         EventKind::Modify(_) => FolderChangeType::CONTENT,
         EventKind::Any => FolderChangeType::CONTENT,
         EventKind::Other => FolderChangeType::CONTENT,
+        EventKind::Access(_) => FolderChangeType::CONTENT,
     }
 }
 
@@ -641,7 +634,7 @@ impl FolderDispatcher {
 
                                     let should = ct_filter.as_ref().map_or(true, |f| f.contains(&FolderChangeType::MOVED_OUT));
                                     if should {
-                                        let fd_res = Python::with_gil(|py| {
+                                        Python::with_gil(|py| {
                                             let fd = Py::new(
                                                 py,
                                                 FolderData::now(
@@ -654,21 +647,13 @@ impl FolderDispatcher {
                                                     None,
                                                 ),
                                             )?;
-                                            Ok::<Py<FolderData>, PyErr>(fd)
-                                        });
-                                        match fd_res {
-                                            Ok(fd) => {
-                                                for cb in &obs_snapshot {
-                                                    cb(fd.clone());
-                                                }
-                                                let mut g = state_clone_dispatch.lock().unwrap();
-                                                g.dispatch_count += 1;
+                                            for cb in &obs_snapshot {
+                                                cb(fd.clone_ref(py));
                                             }
-                                            Err(_) => {
-                                                let mut g = state_clone_dispatch.lock().unwrap();
-                                                g.error_count += 1;
-                                            }
-                                        }
+                                            let mut g = state_clone_dispatch.lock().unwrap();
+                                            g.dispatch_count += 1;
+                                            Ok::<(), PyErr>(())
+                                        }).unwrap_or(());
                                     }
                                     continue;
                                 }
@@ -692,7 +677,7 @@ impl FolderDispatcher {
                             continue;
                         }
 
-                        let fd_res = Python::with_gil(|py| {
+                        Python::with_gil(|py| {
                             let fd = Py::new(
                                 py,
                                 FolderData::now(
@@ -705,22 +690,16 @@ impl FolderDispatcher {
                                     None,
                                 ),
                             )?;
-                            Ok::<Py<FolderData>, PyErr>(fd)
+                            for cb in &observers {
+                                cb(fd.clone_ref(py));
+                            }
+                            let mut guard = state_clone_dispatch.lock().unwrap();
+                            guard.dispatch_count += 1;
+                            Ok::<(), PyErr>(())
+                        }).unwrap_or_else(|_| {
+                            let mut guard = state_clone_dispatch.lock().unwrap();
+                            guard.error_count += 1;
                         });
-
-                        match fd_res {
-                            Ok(fd) => {
-                                for cb in &observers {
-                                    cb(fd.clone());
-                                }
-                                let mut guard = state_clone_dispatch.lock().unwrap();
-                                guard.dispatch_count += 1;
-                            }
-                            Err(_e) => {
-                                let mut guard = state_clone_dispatch.lock().unwrap();
-                                guard.error_count += 1;
-                            }
-                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -745,7 +724,7 @@ impl FolderDispatcher {
     }
 
     fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<PyObject> {
-        let cb = Py::new(py, on_next)?;
+        let cb = on_next.clone_ref(py);
         let observer_cb: FolderObserverCallback = Arc::new(move |fd: Py<FolderData>| {
             Python::with_gil(|py| {
                 let _ = cb.call1(py, (fd,));
@@ -929,7 +908,7 @@ impl FolderSubject {
         if let Some(d) = &*guard {
             let result = d.bind(py).call_method1("subscribe", (on_next,))?;
             *self.subscribed.lock().unwrap() = true;
-            Ok(result)
+            Ok(result.unbind().into_any())
         } else {
             Err(pyo3::exceptions::PyRuntimeError::new_err("FolderSubject dispatcher is not available"))
         }
@@ -986,7 +965,7 @@ impl FolderSubject {
         for op in operators.iter() {
             // 每个 operator 是 callable，接受 (source) -> new_observable
             let result = op.call1((current,))?;
-            current = result;
+            current = result.unbind().into_any();
         }
 
         Ok(current)
@@ -1105,7 +1084,7 @@ impl FolderObserver {
                 }
             }
 
-            let err_cb = h.on_error.clone();
+            let err_cb = h.on_error.as_ref().map(|e| e.clone_ref(py));
             (any, specific, err_cb)
         };
 
@@ -1159,7 +1138,12 @@ impl FolderObserver {
 
     fn unsubscribe(&self) {
         // 通知 Python 端订阅对象 dispose（如果有）
-        let refs = self.subscription_refs.lock().unwrap().clone();
+        let refs: Vec<PyObject> = Python::with_gil(|py| {
+            self.subscription_refs.lock().unwrap()
+                .iter()
+                .map(|r| r.clone_ref(py))
+                .collect()
+        });
         for r in refs {
             Python::with_gil(|py| {
                 if let Ok(dispose) = r.getattr(py, "dispose") {
@@ -1299,7 +1283,7 @@ impl FolderObserverWrapper {
                     specific.push(cb.clone_ref(py));
                 }
             }
-            let err_cb = h.on_error.clone();
+            let err_cb = h.on_error.as_ref().map(|e| e.clone_ref(py));
             (any, specific, err_cb)
         };
 
@@ -1371,7 +1355,7 @@ struct WriteToFolderOperator {
 impl WriteToFolderOperator {
     fn __call__(&self, source: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         let obs = WriteToFolderObservable {
-            source: Py::new(py, source.extract::<PyObject>(py)?)?,
+            source: source.extract::<PyObject>(py)?,
             mode: self.mode.clone(),
         };
         Ok(Py::new(py, obs)?.into_any())
@@ -1388,12 +1372,12 @@ struct WriteToFolderObservable {
 impl WriteToFolderObservable {
     fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         let handler = WriteFolderHandler {
-            downstream: Py::new(py, on_next)?,
+            downstream: on_next.clone_ref(py),
             mode: self.mode.clone(),
         };
         let handler_py = Py::new(py, handler)?.into_any();
         let source_ref = self.source.bind(py);
-        source_ref.call_method1("subscribe", (handler_py,))
+        Ok(source_ref.call_method1("subscribe", (handler_py,))?.unbind().into_any())
     }
 }
 
@@ -1414,20 +1398,16 @@ impl WriteFolderHandler {
         if let Ok(fd_ref) = item.extract::<PyRef<FolderData>>(py) {
             path = fd_ref.path.clone();
             emit_ct = fd_ref.change_type;
-        } else if let Ok(dict_ref) = item.extract::<&PyDict>(py) {
+        } else if let Ok(dict_ref) = item.bind(py).downcast::<PyDict>() {
             // dict: {"path": "...", "mode": "..."}
-            if let Ok(p) = dict_ref.get_item("path") {
-                if let Ok(s) = p {
-                    if let Ok(p_str) = s.extract::<String>() {
-                        path = p_str;
-                    }
+            if let Some(p) = dict_ref.get_item("path")? {
+                if let Ok(p_str) = p.extract::<String>() {
+                    path = p_str;
                 }
             }
-            if let Ok(m) = dict_ref.get_item("change_type") {
-                if let Ok(mode_val) = m {
-                    if let Ok(ct) = mode_val.extract::<u32>() {
-                        emit_ct = ct;
-                    }
+            if let Some(m) = dict_ref.get_item("change_type")? {
+                if let Ok(ct) = m.extract::<u32>() {
+                    emit_ct = ct;
                 }
             }
         } else if let Ok(p_str) = item.extract::<String>(py) {

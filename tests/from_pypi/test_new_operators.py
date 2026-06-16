@@ -1,6 +1,6 @@
 """新算子测试集 — 覆盖所有扩展功能。"""
 import sys, os, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rx-rust-py', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'rx-rust-py', 'python'))
 import rx_rust
 from rx_rust import Observable, Subscription, ops
 

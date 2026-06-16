@@ -26,25 +26,22 @@ use crate::Subscription;
 #[cfg(windows)]
 mod mouse_io_ext {
     use super::*;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput,
+    };
 
     impl MouseIO {
-        /// 按下左键
-        pub fn left_down(&self) -> PyResult<()> {
+        pub fn left_down() -> PyResult<()> {
             println!("[keyboard_mouse] left_down");
-            self.send_mouse_input(0, 0, 0, MOUSEEVENTF_LEFTDOWN)
+            Self::send_mouse_input(0, 0, 0, MOUSEEVENTF_LEFTDOWN)
         }
 
-        /// 释放左键
-        pub fn left_up(&self) -> PyResult<()> {
+        pub fn left_up() -> PyResult<()> {
             println!("[keyboard_mouse] left_up");
-            self.send_mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP)
+            Self::send_mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP)
         }
 
-        fn send_mouse_input(&self, dx: i32, dy: i32, mouse_data: u32, flags: u32) -> PyResult<()> {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT,
-            };
+        fn send_mouse_input(dx: i32, dy: i32, mouse_data: u32, flags: u32) -> PyResult<()> {
             let input = INPUT {
                 r#type: INPUT_MOUSE,
                 Anonymous: INPUT_0 {
@@ -59,12 +56,7 @@ mod mouse_io_ext {
                 },
             };
             let inputs = [input];
-            let result = unsafe {
-                windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
-                    &inputs,
-                    std::mem::size_of::<INPUT>() as i32,
-                )
-            };
+            let result = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
             if result == 0 {
                 println!("[keyboard_mouse] SendInput (mouse) failed");
             }
@@ -78,12 +70,12 @@ mod mouse_io_ext {
     use super::*;
 
     impl MouseIO {
-        pub fn left_down(&self) -> PyResult<()> {
+        pub fn left_down() -> PyResult<()> {
             println!("[keyboard_mouse] left_down: not supported on this platform");
             Ok(())
         }
 
-        pub fn left_up(&self) -> PyResult<()> {
+        pub fn left_up() -> PyResult<()> {
             println!("[keyboard_mouse] left_up: not supported on this platform");
             Ok(())
         }
@@ -258,11 +250,11 @@ impl KeyboardDispatcher {
                         e2
                     )));
                 }
-                *slf.borrow(py).backend.lock().unwrap() = Some(polling);
+                *slf.borrow(py).backend.lock() = Some(polling);
                 // 启动消费线程，使用 rx2
                 Self::start_consumer_thread(py, self_arc, rx2, running);
             } else {
-                *slf.borrow(py).backend.lock().unwrap() = Some(backend);
+                *slf.borrow(py).backend.lock() = Some(backend);
                 // 启动消费线程
                 Self::start_consumer_thread(py, self_arc, rx, running);
             }
@@ -276,7 +268,7 @@ impl KeyboardDispatcher {
             slf.borrow(py).started.store(false, Ordering::SeqCst);
             slf.borrow(py).running.store(false, Ordering::SeqCst);
             // 停止后端
-            if let Some(backend) = slf.borrow(py).backend.lock().unwrap().take() {
+            if let Some(backend) = slf.borrow(py).backend.lock().take() {
                 backend.stop();
             }
         });
@@ -295,8 +287,8 @@ impl KeyboardDispatcher {
     }
 
     // --- 订阅 ---
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
-        self.subject.subscribe(on_next)
+    fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<Py<Subscription>> {
+        Ok(self.subject.call_method1(py, "subscribe", (on_next,))?.extract(py)?)
     }
 
     // --- 模拟操作（触发自我过滤） ---
@@ -310,7 +302,7 @@ impl KeyboardDispatcher {
         self.register_self_event(key_code, 0);
 
         // 调用 io.press_key
-        self.io.press_key(key_code)
+        KeyboardIO::press_key(key_code)
     }
 
     fn release(&self, key: &str, py: Python<'_>) -> PyResult<()> {
@@ -319,7 +311,7 @@ impl KeyboardDispatcher {
         })?;
 
         self.register_self_event(key_code, 1);
-        self.io.release_key(key_code)
+        KeyboardIO::release_key(key_code)
     }
 
     fn type_text(&self, text: &str, _py: Python<'_>) -> PyResult<()> {
@@ -328,19 +320,19 @@ impl KeyboardDispatcher {
             if ch.is_ascii() {
                 if let Some(key_code) = name_to_key_code(&ch.to_uppercase().to_string()) {
                     self.register_self_event(key_code, 0);
-                    let _ = self.io.press_key(key_code);
-                    let _ = self.io.release_key(key_code);
+                    let _ = KeyboardIO::press_key(key_code);
+                    let _ = KeyboardIO::release_key(key_code);
                 }
             } else {
                 // 非 ASCII 使用 type_text
                 self.register_self_event(0, 0);
-                let _ = self.io.type_text(&ch.to_string());
+                let _ = KeyboardIO::type_text(&ch.to_string());
             }
         }
         Ok(())
     }
 
-    fn hotkey(&self, keys: Vec<&str>, _py: Python<'_>) -> PyResult<()> {
+    fn hotkey(&self, keys: Vec<String>, _py: Python<'_>) -> PyResult<()> {
         // 解析所有 key → key_codes
         let mut key_codes: Vec<u32> = Vec::new();
         for key in &keys {
@@ -355,7 +347,7 @@ impl KeyboardDispatcher {
         }
 
         // 调用 io.hotkey
-        self.io.hotkey(&key_codes)
+        KeyboardIO::hotkey(&key_codes)
     }
 
     fn tap(&self, key: &str, py: Python<'_>) -> PyResult<()> {
@@ -385,12 +377,25 @@ impl KeyboardDispatcher {
     ) {
         let subject_clone = slf.borrow(py).subject.clone_ref(py);
         let filter_self_flag = slf.borrow(py).self_filter;
-        let self_events: Arc<Mutex<VecDeque<SelfEvent>>> = Arc::new(Mutex::new(
-            VecDeque::with_capacity(slf.borrow(py).self_filter_cap),
-        ));
         let self_filter_cap = slf.borrow(py).self_filter_cap;
-        let inner = Arc::new(Mutex::new(slf.borrow(py).inner.lock().unwrap().clone()));
-        let filter_self = slf.borrow(py).self_filter;
+        let inner_data = {
+            let slf_ref = slf.borrow(py);
+            let inner_guard = slf_ref.inner.lock();
+            let dispatch_count = inner_guard.dispatch_count;
+            let error_count = inner_guard.error_count;
+            let self_filtered_count = inner_guard.self_filtered_count;
+            let last_key_state = inner_guard.last_key_state.clone();
+            (dispatch_count, error_count, self_filtered_count, last_key_state)
+        };
+        let self_events: Arc<Mutex<VecDeque<SelfEvent>>> = Arc::new(Mutex::new(
+            VecDeque::with_capacity(self_filter_cap),
+        ));
+        let inner = Arc::new(Mutex::new(KeyboardDispatcherInner {
+            dispatch_count: inner_data.0,
+            error_count: inner_data.1,
+            self_filtered_count: inner_data.2,
+            last_key_state: inner_data.3,
+        }));
 
         let self_events_clone = self_events.clone();
 
@@ -405,12 +410,12 @@ impl KeyboardDispatcher {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(raw_event) => {
                         // 检查自我过滤
-                        let should_filter = if filter_self {
+                        let should_filter = if filter_self_flag {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs_f64();
-                            let mut events = self_events_clone.lock().unwrap();
+                            let mut events = self_events_clone.lock();
                             // 清理超过 5s 的旧事件
                             events.retain(|e| now - e.timestamp < 5.0);
 
@@ -451,9 +456,8 @@ impl KeyboardDispatcher {
                                 py,
                                 KeyData::now(
                                     key_code,
-                                    key_code_to_name(key_code),
                                     is_press,
-                                    0,
+                                    Some(0),
                                     None,
                                 ),
                             )
@@ -461,8 +465,10 @@ impl KeyboardDispatcher {
                         });
 
                         if let Some(fd) = fd_option {
-                            subject_clone.call_method1("on_next", (fd,)).ok();
-                            inner.lock().unwrap().dispatch_count += 1;
+                            Python::with_gil(|py| {
+                                let _ = subject_clone.call_method1(py, "on_next", (fd,));
+                            });
+                            inner.lock().dispatch_count += 1;
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -481,7 +487,7 @@ impl KeyboardDispatcher {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let mut events = self.self_events.lock().unwrap();
+        let mut events = self.self_events.lock();
         if events.len() >= self.self_filter_cap {
             events.pop_front();
         }
@@ -649,10 +655,10 @@ impl MouseDispatcher {
                         e2
                     )));
                 }
-                *slf.borrow(py).backend.lock().unwrap() = Some(polling);
+                *slf.borrow(py).backend.lock() = Some(polling);
                 Self::start_consumer_thread(py, self_arc, rx2, running);
             } else {
-                *slf.borrow(py).backend.lock().unwrap() = Some(backend);
+                *slf.borrow(py).backend.lock() = Some(backend);
                 Self::start_consumer_thread(py, self_arc, rx, running);
             }
 
@@ -664,7 +670,7 @@ impl MouseDispatcher {
         Python::with_gil(|py| {
             slf.borrow(py).started.store(false, Ordering::SeqCst);
             slf.borrow(py).running.store(false, Ordering::SeqCst);
-            if let Some(backend) = slf.borrow(py).backend.lock().unwrap().take() {
+            if let Some(backend) = slf.borrow(py).backend.lock().take() {
                 backend.stop();
             }
         });
@@ -683,25 +689,24 @@ impl MouseDispatcher {
     }
 
     // --- 订阅 ---
-    fn subscribe(&self, on_next: PyObject) -> Py<Subscription> {
-        self.subject.subscribe(on_next)
+    fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<Py<Subscription>> {
+        Ok(self.subject.call_method1(py, "subscribe", (on_next,))?.extract(py)?)
     }
 
     // --- 模拟操作 ---
     fn move_to(&self, x: i32, y: i32, _py: Python<'_>) -> PyResult<()> {
-        // 移动鼠标到绝对坐标
-        self.register_self_event(0, 0); // 简单标记
-        self.io.move_to(x, y)
+        self.register_self_event(0, 0);
+        MouseIO::move_to(x, y)
     }
 
     fn click(&self, button: &str, _py: Python<'_>) -> PyResult<()> {
         self.register_self_event(0, 0);
-        self.io.click(button)
+        MouseIO::click(button)
     }
 
     fn scroll(&self, delta: i32, _py: Python<'_>) -> PyResult<()> {
         self.register_self_event(0, 0);
-        self.io.scroll(delta)
+        MouseIO::scroll(delta)
     }
 
     fn drag(
@@ -712,28 +717,27 @@ impl MouseDispatcher {
         to_y: i32,
         _py: Python<'_>,
     ) -> PyResult<()> {
-        // move_to(from) → left_down → move_to(to) → left_up
         self.register_self_event(0, 0);
-        self.io.move_to(from_x, from_y)?;
+        MouseIO::move_to(from_x, from_y)?;
         self.register_self_event(0, 0);
-        self.io.left_down()?;
+        MouseIO::left_down()?;
         self.register_self_event(0, 0);
-        self.io.move_to(to_x, to_y)?;
+        MouseIO::move_to(to_x, to_y)?;
         self.register_self_event(0, 0);
-        self.io.left_up()?;
+        MouseIO::left_up()?;
         Ok(())
     }
 
     fn double_click(&self, button: &str, _py: Python<'_>) -> PyResult<()> {
         self.register_self_event(0, 0);
-        self.io.click(button)?;
+        MouseIO::click(button)?;
         self.register_self_event(0, 0);
-        self.io.click(button)
+        MouseIO::click(button)
     }
 
     fn move_relative(&self, dx: i32, dy: i32, _py: Python<'_>) -> PyResult<()> {
         self.register_self_event(0, 0);
-        self.io.move_relative(dx, dy)
+        MouseIO::move_relative(dx, dy)
     }
 }
 
@@ -751,11 +755,24 @@ impl MouseDispatcher {
     ) {
         let subject_clone = slf.borrow(py).subject.clone_ref(py);
         let filter_self_flag = slf.borrow(py).self_filter;
+        let self_filter_cap = slf.borrow(py).self_filter_cap;
         let self_events: Arc<Mutex<VecDeque<SelfEvent>>> = Arc::new(Mutex::new(
-            VecDeque::with_capacity(slf.borrow(py).self_filter_cap),
+            VecDeque::with_capacity(self_filter_cap),
         ));
-        let inner = Arc::new(Mutex::new(slf.borrow(py).inner.lock().unwrap().clone()));
-        let filter_self = slf.borrow(py).self_filter;
+        let inner = {
+            let slf_ref = slf.borrow(py);
+            let inner_guard = slf_ref.inner.lock();
+            let dispatch_count = inner_guard.dispatch_count;
+            let error_count = inner_guard.error_count;
+            let self_filtered_count = inner_guard.self_filtered_count;
+            drop(inner_guard);
+            drop(slf_ref);
+            Arc::new(Mutex::new(MouseDispatcherInner {
+                dispatch_count,
+                error_count,
+                self_filtered_count,
+            }))
+        };
 
         let self_events_clone = self_events.clone();
 
@@ -768,12 +785,12 @@ impl MouseDispatcher {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(raw_event) => {
                         // 检查自我过滤（鼠标事件简化处理）
-                        let should_filter = if filter_self {
+                        let should_filter = if filter_self_flag {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs_f64();
-                            let mut events = self_events_clone.lock().unwrap();
+                            let mut events = self_events_clone.lock();
                             events.retain(|e| now - e.timestamp < 5.0);
 
                             // 鼠标事件简化：检查是否有近期标记
@@ -797,32 +814,34 @@ impl MouseDispatcher {
                         // 构造 MouseData
                         let fd_option = Python::with_gil(|py| {
                             let (x, y, event_type, button, delta) = match raw_event {
-                                RawMouseEvent::Move(x, y) => (x, y, 0u8, "none".to_string(), 0),
-                                RawMouseEvent::LeftDown(x, y) => (x, y, 1u8, "left".to_string(), 0),
-                                RawMouseEvent::LeftUp(x, y) => (x, y, 2u8, "left".to_string(), 0),
+                                RawMouseEvent::Move(x, y) => (x, y, 0u8, Some("none".to_string()), 0),
+                                RawMouseEvent::LeftDown(x, y) => (x, y, 1u8, Some("left".to_string()), 0),
+                                RawMouseEvent::LeftUp(x, y) => (x, y, 2u8, Some("left".to_string()), 0),
                                 RawMouseEvent::RightDown(x, y) => {
-                                    (x, y, 3u8, "right".to_string(), 0)
+                                    (x, y, 3u8, Some("right".to_string()), 0)
                                 }
-                                RawMouseEvent::RightUp(x, y) => (x, y, 4u8, "right".to_string(), 0),
+                                RawMouseEvent::RightUp(x, y) => (x, y, 4u8, Some("right".to_string()), 0),
                                 RawMouseEvent::MiddleDown(x, y) => {
-                                    (x, y, 5u8, "middle".to_string(), 0)
+                                    (x, y, 5u8, Some("middle".to_string()), 0)
                                 }
                                 RawMouseEvent::MiddleUp(x, y) => {
-                                    (x, y, 6u8, "middle".to_string(), 0)
+                                    (x, y, 6u8, Some("middle".to_string()), 0)
                                 }
                                 RawMouseEvent::Scroll(x, y, delta) => {
-                                    (x, y, 7u8, "none".to_string(), delta)
+                                    (x, y, 7u8, Some("none".to_string()), delta)
                                 }
                                 RawMouseEvent::Wheel(x, y, delta) => {
-                                    (x, y, 7u8, "none".to_string(), delta)
+                                    (x, y, 7u8, Some("none".to_string()), delta)
                                 }
                             };
                             Py::new(py, MouseData::now(x, y, event_type, button, delta)).ok()
                         });
 
                         if let Some(fd) = fd_option {
-                            subject_clone.call_method1("on_next", (fd,)).ok();
-                            inner.lock().unwrap().dispatch_count += 1;
+                            Python::with_gil(|py| {
+                                let _ = subject_clone.call_method1(py, "on_next", (fd,));
+                            });
+                            inner.lock().dispatch_count += 1;
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -841,7 +860,7 @@ impl MouseDispatcher {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let mut events = self.self_events.lock().unwrap();
+        let mut events = self.self_events.lock();
         if events.len() >= self.self_filter_cap {
             events.pop_front();
         }

@@ -9,10 +9,8 @@
 import os
 import sys
 
-# 确保能从当前目录导入包
 _HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "..", "rx-rust-py", "python"))
 
 # ===== 导入部分 =====
 try:

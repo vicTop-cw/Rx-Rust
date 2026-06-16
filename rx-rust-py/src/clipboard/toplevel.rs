@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::clipboard::dispatcher::ClipboardDispatcher;
-use crate::clipboard::types::{ClipChangeType, ClipData};
+use crate::clipboard::types::{ClipChangeType, ClipData, ClipContent};
 use crate::{Observable, PublishSubject};
 
 #[pyfunction]
@@ -37,11 +37,11 @@ pub fn from_clipboard(
     )?;
 
     if auto_start {
-        dispatcher.borrow(py).start(py)?;
+        dispatcher.borrow(py).start_me(py)?;
     }
 
     // 返回 (observable_subject, dispatcher)
-    let subject = dispatcher.borrow(py).subject.clone_ref(py);
+    let subject: Py<PublishSubject> = dispatcher.call_method0(py, "subject")?.extract(py)?;
     Ok((subject.into_any(), dispatcher.into_any()))
 }
 
@@ -71,7 +71,7 @@ impl WriteToClipboardOperator {
         )?.into_any();
 
         let obs = crate::Observable::from_subscribe_fn(py, subscribe_fn)?;
-        Ok(obs.into_any())
+        Ok(Py::new(py, obs)?.into_any())
     }
 }
 
@@ -129,15 +129,11 @@ impl ValueWriter {
             let (content, files, change_type, tags, metadata) =
                 parse_value(py, value.clone_ref(py))?;
             // 调用 dispatcher.set_clipboard
-            let clip = ClipboardDispatcher::set_clipboard(
-                self.dispatcher.clone_ref(py),
-                content,
-                files,
-                change_type,
-                self.source.clone(),
-                tags,
-                metadata,
-            )?;
+            let clip: Py<ClipData> = self.dispatcher.call_method1(
+                py,
+                "set_clipboard",
+                (content, files, change_type, self.source.clone(), tags, metadata),
+            )?.extract(py)?;
             // 向下游分发
             let _ = self.downstream.call1(py, (clip,));
             Ok(())
@@ -194,7 +190,11 @@ fn parse_value(
     // 如果是 ClipData，直接取内容
     if let Ok(clip) = value.extract::<Py<ClipData>>(py) {
         let clip_b = clip.borrow(py);
-        let content = Some(clip_b.get_content(py));
+        let content = match &clip_b.content {
+            ClipContent::None => None,
+            ClipContent::Text(s) => Some(s.to_object(py).into_any()),
+            ClipContent::Bytes(b) => Some(b.to_object(py).into_any()),
+        };
         let files = Some(clip_b.files.clone());
         let change_type = Some(clip_b.change_type.clone_ref(py));
         let tags = Some(clip_b.tags.clone());
@@ -205,7 +205,7 @@ fn parse_value(
     // string
     if let Ok(s) = value.extract::<String>(py) {
         return Ok((
-            Some(s.into_pyobject(py)?.unbind().into_any()),
+            Some(s.to_object(py).into_any()),
             None,
             Some(Py::new(py, ClipChangeType { value: 0 })?),
             None,
@@ -216,7 +216,7 @@ fn parse_value(
     // bytes
     if let Ok(b) = value.extract::<Vec<u8>>(py) {
         return Ok((
-            Some(b.into_pyobject(py)?.unbind().into_any()),
+            Some(b.to_object(py).into_any()),
             None,
             Some(Py::new(py, ClipChangeType { value: 2 })?),
             None,
@@ -259,9 +259,9 @@ fn parse_value(
     }
 
     // 作为字符串写回
-    let s = value.str()?.to_string();
+    let s = value.bind(py).str()?.to_string();
     Ok((
-        Some(s.into_pyobject(py)?.unbind().into_any()),
+        Some(s.to_object(py).into_any()),
         None,
         Some(Py::new(py, ClipChangeType { value: 0 })?),
         None,

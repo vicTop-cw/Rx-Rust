@@ -5,20 +5,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
 
-use crate::keyboard_mouse::dispatcher::{KeyboardDispatcher, MouseDispatcher};
 use crate::PublishSubject;
 
 /// KeySubject：键盘事件主题，封装 KeyboardDispatcher
 #[pyclass(name = "KeySubject")]
 pub struct KeySubject {
-    dispatcher: Py<KeyboardDispatcher>,
+    dispatcher: PyObject,
     started: AtomicBool,
 }
 
 /// MouseSubject：鼠标事件主题，封装 MouseDispatcher
 #[pyclass(name = "MouseSubject")]
 pub struct MouseSubject {
-    dispatcher: Py<MouseDispatcher>,
+    dispatcher: PyObject,
     started: AtomicBool,
 }
 
@@ -27,44 +26,45 @@ impl KeySubject {
     #[new]
     #[pyo3(signature = (backend="auto".to_string(), interval=0.05, filter_self=true))]
     fn new(py: Python<'_>, backend: String, interval: f64, filter_self: bool) -> PyResult<Self> {
-        let dispatcher = Py::new(
-            py,
-            KeyboardDispatcher::new(py, backend, interval, filter_self, None, 32)?,
-        )?;
+        let dispatcher_class = py.get_type_bound::<crate::keyboard_mouse::dispatcher::KeyboardDispatcher>();
+        let dispatcher = dispatcher_class.call1((backend, interval, filter_self, None::<PyObject>, 32))?;
 
         let subject = Self {
-            dispatcher,
+            dispatcher: dispatcher.unbind(),
             started: AtomicBool::new(false),
         };
 
-        // 构造后自动启动
         subject.start(py)?;
         Ok(subject)
     }
 
     #[getter]
-    fn dispatcher<'py>(&self, py: Python<'py>) -> Py<KeyboardDispatcher> {
+    fn dispatcher(&self, py: Python<'_>) -> PyObject {
         self.dispatcher.clone_ref(py)
     }
 
     #[getter]
-    fn subject(&self, py: Python<'_>) -> Py<PublishSubject> {
-        self.dispatcher.borrow(py).subject.clone_ref(py)
+    fn subject(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let subject = self.dispatcher.bind(py).getattr("subject")?;
+        Ok(subject.unbind())
     }
 
     #[getter]
-    fn backend_name(&self) -> String {
-        self.dispatcher.borrow().backend_name.clone()
+    fn backend_name(&self, py: Python<'_>) -> PyResult<String> {
+        let name = self.dispatcher.bind(py).getattr("backend_name")?;
+        name.extract()
     }
 
     #[getter]
-    fn dispatch_count(&self) -> u64 {
-        self.dispatcher.borrow().dispatch_count()
+    fn dispatch_count(&self, py: Python<'_>) -> PyResult<u64> {
+        let count = self.dispatcher.bind(py).getattr("dispatch_count")?;
+        count.extract()
     }
 
     #[getter]
-    fn self_filtered_count(&self) -> u64 {
-        self.dispatcher.borrow().self_filtered_count()
+    fn self_filtered_count(&self, py: Python<'_>) -> PyResult<u64> {
+        let count = self.dispatcher.bind(py).getattr("self_filtered_count")?;
+        count.extract()
     }
 
     #[getter]
@@ -76,49 +76,54 @@ impl KeySubject {
         if self.started.load(Ordering::SeqCst) {
             return Ok(());
         }
-        KeyboardDispatcher::start(self.dispatcher.clone_ref(py))?;
+        self.dispatcher.bind(py).call_method0("start")?;
         self.started.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn stop(&self, py: Python<'_>) {
         self.started.store(false, Ordering::SeqCst);
-        KeyboardDispatcher::stop(self.dispatcher.clone_ref(py));
+        let _ = self.dispatcher.bind(py).call_method0("stop");
     }
 
-    fn subscribe(&self, py: Python<'_>, observer: PyObject) -> PyObject {
-        let subject = self.dispatcher.borrow(py).subject.clone_ref(py);
-        let res = subject.borrow(py).subscribe(observer);
-        res.into_any().clone_ref(py)
+    fn subscribe(&self, py: Python<'_>, observer: PyObject) -> PyResult<PyObject> {
+        let subject = self.dispatcher.bind(py).getattr("subject")?;
+        let res = subject.call_method1("subscribe", (observer,))?;
+        Ok(res.unbind())
     }
 
-    // 模拟操作透传
     fn press(&self, key: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).press(key, py)
+        self.dispatcher.bind(py).call_method1("press", (key,))?;
+        Ok(())
     }
 
     fn release(&self, key: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).release(key, py)
+        self.dispatcher.bind(py).call_method1("release", (key,))?;
+        Ok(())
     }
 
     fn type_text(&self, text: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).type_text(text, py)
+        self.dispatcher.bind(py).call_method1("type_text", (text,))?;
+        Ok(())
     }
 
-    fn hotkey(&self, keys: Vec<&str>, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).hotkey(keys, py)
+    fn hotkey(&self, keys: Vec<String>, py: Python<'_>) -> PyResult<()> {
+        self.dispatcher.bind(py).call_method1("hotkey", (keys,))?;
+        Ok(())
     }
 
     fn tap(&self, key: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).tap(key, py)
+        self.dispatcher.bind(py).call_method1("tap", (key,))?;
+        Ok(())
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
-        let py = Python::acquire_gil().python();
-        let slf_ref = slf.clone_ref(py);
-        if let Err(e) = Self::start(&slf_ref, py) {
-            eprintln!("KeySubject start error: {:?}", e);
-        }
+        Python::with_gil(|py| {
+            let slf_ref = slf.borrow(py);
+            if let Err(e) = slf_ref.start(py) {
+                eprintln!("KeySubject start error: {:?}", e);
+            }
+        });
         slf
     }
 
@@ -135,7 +140,7 @@ impl KeySubject {
 
     fn __del__(&mut self) {
         Python::with_gil(|py| {
-            self.stop(py).ok();
+            self.stop(py);
         });
     }
 }
@@ -145,44 +150,45 @@ impl MouseSubject {
     #[new]
     #[pyo3(signature = (backend="auto".to_string(), interval=0.05, filter_self=true))]
     fn new(py: Python<'_>, backend: String, interval: f64, filter_self: bool) -> PyResult<Self> {
-        let dispatcher = Py::new(
-            py,
-            MouseDispatcher::new(py, backend, interval, filter_self, None, 32)?,
-        )?;
+        let dispatcher_class = py.get_type_bound::<crate::keyboard_mouse::dispatcher::MouseDispatcher>();
+        let dispatcher = dispatcher_class.call1((backend, interval, filter_self, None::<PyObject>, 32))?;
 
         let subject = Self {
-            dispatcher,
+            dispatcher: dispatcher.unbind(),
             started: AtomicBool::new(false),
         };
 
-        // 构造后自动启动
         subject.start(py)?;
         Ok(subject)
     }
 
     #[getter]
-    fn dispatcher<'py>(&self, py: Python<'py>) -> Py<MouseDispatcher> {
+    fn dispatcher(&self, py: Python<'_>) -> PyObject {
         self.dispatcher.clone_ref(py)
     }
 
     #[getter]
-    fn subject(&self, py: Python<'_>) -> Py<PublishSubject> {
-        self.dispatcher.borrow(py).subject.clone_ref(py)
+    fn subject(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let subject = self.dispatcher.bind(py).getattr("subject")?;
+        Ok(subject.unbind())
     }
 
     #[getter]
-    fn backend_name(&self) -> String {
-        self.dispatcher.borrow().backend_name.clone()
+    fn backend_name(&self, py: Python<'_>) -> PyResult<String> {
+        let name = self.dispatcher.bind(py).getattr("backend_name")?;
+        name.extract()
     }
 
     #[getter]
-    fn dispatch_count(&self) -> u64 {
-        self.dispatcher.borrow().dispatch_count()
+    fn dispatch_count(&self, py: Python<'_>) -> PyResult<u64> {
+        let count = self.dispatcher.bind(py).getattr("dispatch_count")?;
+        count.extract()
     }
 
     #[getter]
-    fn self_filtered_count(&self) -> u64 {
-        self.dispatcher.borrow().self_filtered_count()
+    fn self_filtered_count(&self, py: Python<'_>) -> PyResult<u64> {
+        let count = self.dispatcher.bind(py).getattr("self_filtered_count")?;
+        count.extract()
     }
 
     #[getter]
@@ -194,55 +200,59 @@ impl MouseSubject {
         if self.started.load(Ordering::SeqCst) {
             return Ok(());
         }
-        MouseDispatcher::start(self.dispatcher.clone_ref(py))?;
+        self.dispatcher.bind(py).call_method0("start")?;
         self.started.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn stop(&self, py: Python<'_>) {
         self.started.store(false, Ordering::SeqCst);
-        MouseDispatcher::stop(self.dispatcher.clone_ref(py));
+        let _ = self.dispatcher.bind(py).call_method0("stop");
     }
 
-    fn subscribe(&self, py: Python<'_>, observer: PyObject) -> PyObject {
-        let subject = self.dispatcher.borrow(py).subject.clone_ref(py);
-        let res = subject.borrow(py).subscribe(observer);
-        res.into_any().clone_ref(py)
+    fn subscribe(&self, py: Python<'_>, observer: PyObject) -> PyResult<PyObject> {
+        let subject = self.dispatcher.bind(py).getattr("subject")?;
+        let res = subject.call_method1("subscribe", (observer,))?;
+        Ok(res.unbind())
     }
 
-    // 鼠标特有操作透传
     fn move_to(&self, x: i32, y: i32, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).move_to(x, y, py)
+        self.dispatcher.bind(py).call_method1("move_to", (x, y))?;
+        Ok(())
     }
 
     fn click(&self, button: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).click(button, py)
+        self.dispatcher.bind(py).call_method1("click", (button,))?;
+        Ok(())
     }
 
     fn scroll(&self, delta: i32, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).scroll(delta, py)
+        self.dispatcher.bind(py).call_method1("scroll", (delta,))?;
+        Ok(())
     }
 
     fn drag(&self, from_x: i32, from_y: i32, to_x: i32, to_y: i32, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher
-            .borrow(py)
-            .drag(from_x, from_y, to_x, to_y, py)
+        self.dispatcher.bind(py).call_method1("drag", (from_x, from_y, to_x, to_y))?;
+        Ok(())
     }
 
     fn double_click(&self, button: &str, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).double_click(button, py)
+        self.dispatcher.bind(py).call_method1("double_click", (button,))?;
+        Ok(())
     }
 
     fn move_relative(&self, dx: i32, dy: i32, py: Python<'_>) -> PyResult<()> {
-        self.dispatcher.borrow(py).move_relative(dx, dy, py)
+        self.dispatcher.bind(py).call_method1("move_relative", (dx, dy))?;
+        Ok(())
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
-        let py = Python::acquire_gil().python();
-        let slf_ref = slf.clone_ref(py);
-        if let Err(e) = Self::start(&slf_ref, py) {
-            eprintln!("MouseSubject start error: {:?}", e);
-        }
+        Python::with_gil(|py| {
+            let slf_ref = slf.borrow(py);
+            if let Err(e) = slf_ref.start(py) {
+                eprintln!("MouseSubject start error: {:?}", e);
+            }
+        });
         slf
     }
 
@@ -259,7 +269,7 @@ impl MouseSubject {
 
     fn __del__(&mut self) {
         Python::with_gil(|py| {
-            self.stop(py).ok();
+            self.stop(py);
         });
     }
 }

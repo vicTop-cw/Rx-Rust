@@ -18,23 +18,21 @@ use crate::Subscription;
 #[pyo3(signature = (backend="auto", interval=0.05, filter_self=true, auto_start=true, self_filter=None))]
 pub fn from_keyboard(
     py: Python<'_>,
-    backend: String,
+    backend: &str,
     interval: f64,
     filter_self: bool,
     auto_start: bool,
     self_filter: Option<PyObject>,
 ) -> PyResult<(PyObject, PyObject)> {
-    let dispatcher = Py::new(
-        py,
-        KeyboardDispatcher::new(py, backend, interval, filter_self, self_filter, 32)?,
-    )?;
+    let dispatcher_class = py.get_type_bound::<KeyboardDispatcher>();
+    let dispatcher = dispatcher_class.call1((backend.to_string(), interval, filter_self, self_filter, 32))?;
 
     if auto_start {
-        KeyboardDispatcher::start(dispatcher.clone_ref(py))?;
+        dispatcher.call_method0("start")?;
     }
 
-    let subject = dispatcher.bind(py).getattr("subject")?.unbind();
-    Ok((subject, dispatcher.into_any()))
+    let subject = dispatcher.getattr("subject")?.unbind();
+    Ok((subject, dispatcher.into()))
 }
 
 /// 从鼠标创建 Subject + Dispatcher 元组
@@ -42,23 +40,21 @@ pub fn from_keyboard(
 #[pyo3(signature = (backend="auto", interval=0.05, filter_self=true, auto_start=true, self_filter=None))]
 pub fn from_mouse(
     py: Python<'_>,
-    backend: String,
+    backend: &str,
     interval: f64,
     filter_self: bool,
     auto_start: bool,
     self_filter: Option<PyObject>,
 ) -> PyResult<(PyObject, PyObject)> {
-    let dispatcher = Py::new(
-        py,
-        MouseDispatcher::new(py, backend, interval, filter_self, self_filter, 32)?,
-    )?;
+    let dispatcher_class = py.get_type_bound::<MouseDispatcher>();
+    let dispatcher = dispatcher_class.call1((backend.to_string(), interval, filter_self, self_filter, 32))?;
 
     if auto_start {
-        MouseDispatcher::start(dispatcher.clone_ref(py))?;
+        dispatcher.call_method0("start")?;
     }
 
-    let subject = dispatcher.bind(py).getattr("subject")?.unbind();
-    Ok((subject, dispatcher.into_any()))
+    let subject = dispatcher.getattr("subject")?.unbind();
+    Ok((subject, dispatcher.into()))
 }
 
 // =====================================================================
@@ -99,7 +95,7 @@ impl WriteKeyboardObs {
         let handler_py = Py::new(py, handler)?.into_any();
         let source_ref = self.source.bind(py);
         let result = source_ref.call_method1("subscribe", (handler_py,))?;
-        Ok(result.into_gil_ref().unbind())
+        Ok(result.unbind())
     }
 }
 
@@ -245,7 +241,7 @@ impl WriteMouseObs {
         let handler_py = Py::new(py, handler)?.into_any();
         let source_ref = self.source.bind(py);
         let result = source_ref.call_method1("subscribe", (handler_py,))?;
-        Ok(result.into_gil_ref().unbind())
+        Ok(result.unbind())
     }
 }
 

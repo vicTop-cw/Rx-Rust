@@ -26,7 +26,7 @@ import threading
 import time
 
 # 确保导入本地开发版本
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "rx-rust-py", "python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rx-rust-py", "python"))
 
 import rx_rust  # noqa: E402
 from rx_rust import (  # noqa: E402

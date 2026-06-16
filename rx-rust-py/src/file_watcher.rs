@@ -29,15 +29,6 @@ use std::time::Instant;
 pub struct FileChangeType(pub u32);
 
 impl FileChangeType {
-    pub const CREATED: u32 = 0;
-    pub const MODIFIED: u32 = 1;
-    pub const DELETED: u32 = 2;
-    pub const RENAMED: u32 = 3;
-    pub const MOVED_IN: u32 = 4;
-    pub const MOVED_OUT: u32 = 5;
-    pub const ACCESS: u32 = 6;
-    pub const ATTRIB: u32 = 7;
-
     pub fn to_name(&self) -> &'static str {
         match self.0 {
             0 => "CREATED",
@@ -91,12 +82,12 @@ impl FileChangeType {
 
     fn __eq__(&self, other: PyObject, py: Python<'_>) -> PyObject {
         if let Ok(val) = other.extract::<u32>(py) {
-            return (self.0 == val).into_pyobject(py).unwrap().unbind().into_any();
+            return (self.0 == val).to_object(py).into_any();
         }
         if let Ok(ft) = other.extract::<PyRef<FileChangeType>>(py) {
-            return (self.0 == ft.0).into_pyobject(py).unwrap().unbind().into_any();
+            return (self.0 == ft.0).to_object(py).into_any();
         }
-        false.into_pyobject(py).unwrap().unbind().into_any()
+        false.to_object(py).into_any()
     }
 }
 
@@ -223,7 +214,7 @@ impl FileData {
         let timestamp: f64 = d_borrowed.get_item("timestamp")?.map_or_else(|| {
             let now = std::time::SystemTime::now();
             Ok::<f64, PyErr>(now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64())
-        })?;
+        }, |v| v.extract())?;
         let sequence: u64 = d_borrowed.get_item("sequence")?.map_or_else(|| Ok(SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst)), |v| v.extract())?;
         let tags: Vec<String> = d_borrowed.get_item("tags")?.map_or_else(|| Ok(Vec::new()), |v| v.extract())?;
         let meta_dict: std::collections::HashMap<String, String> = d_borrowed
@@ -539,9 +530,10 @@ impl FileDispatcher {
                             if let Ok(meta) = std::fs::metadata(&path) {
                                 let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                                 let size = meta.len();
+                                let path_clone = path.clone();
                                 snap.insert(path, (mtime, size));
                                 if meta.is_dir() {
-                                    scan_directory(&path, snap);
+                                    scan_directory(&path_clone, snap);
                                 }
                             }
                         }
@@ -629,9 +621,9 @@ impl FileDispatcher {
                             continue;
                         }
 
-                        // 创建 FileData
-                        let fd_res = Python::with_gil(|py| {
-                            let fd = Py::new(
+                        // 创建 FileData 并分发
+                        Python::with_gil(|py| {
+                            if let Ok(fd) = Py::new(
                                 py,
                                 FileData::now(
                                     path.to_string_lossy().into_owned(),
@@ -642,24 +634,18 @@ impl FileDispatcher {
                                     Some(tags_clone),
                                     None,
                                 ),
-                            )?;
-                            Ok::<Py<FileData>, PyErr>(fd)
-                        });
-
-                        match fd_res {
-                            Ok(fd) => {
+                            ) {
                                 // 分发到每个观察者
                                 for obs_cb in &observers {
-                                    obs_cb(fd.clone());
+                                    obs_cb(fd.clone_ref(py));
                                 }
                                 let mut st_guard = state_clone_dispatch.lock().unwrap();
                                 st_guard.dispatch_count += 1;
-                            }
-                            Err(_e) => {
+                            } else {
                                 let mut st_guard = state_clone_dispatch.lock().unwrap();
                                 st_guard.error_count += 1;
                             }
-                        }
+                        });
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -693,7 +679,7 @@ impl FileDispatcher {
 
         // 保存回调 - 我们需要一个能在后台线程调用的闭包
         // 使用 Py<PyObject> + Python::with_gil
-        let cb = Py::new(py, on_next)?;
+        let cb = on_next.clone_ref(py);
 
         let observer_cb: ObserverCallback = Arc::new(move |fd: Py<FileData>| {
             Python::with_gil(|py| {
@@ -803,9 +789,6 @@ impl FileSubject {
     ) -> PyResult<Self> {
         let dispatcher = Py::new(py, FileDispatcher::new(paths, backend, change_types, interval))?;
         let subject = Self { dispatcher };
-        // 自动启动
-        let slf_ref = PyRef::<'_, Self>::from(Py::from(subject.dispatcher.clone()).bind(py));
-        let _ = slf_ref;
         // 手动启动
         let disp_borrow = subject.dispatcher.bind(py);
         let _ = disp_borrow.call_method0("start")?;
@@ -837,7 +820,7 @@ impl FileSubject {
 
     fn subscribe(&self, on_next: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         let d = self.dispatcher.bind(py);
-        d.call_method1("subscribe", (on_next,))
+        Ok(d.call_method1("subscribe", (on_next,))?.unbind().into_any())
     }
 
     fn start(&self, py: Python<'_>) -> PyResult<()> {
@@ -1100,7 +1083,7 @@ fn write_to_filesystem(dispatcher: PyObject, mode: &str, py: Python<'_>) -> PyRe
 
     let op = WriteToFsOperator {
         mode: mode.to_string(),
-        _dispatcher_ref: Py::new(py, dispatcher.extract::<PyObject>(py)?)?.clone_ref(py),
+        _dispatcher_ref: dispatcher.extract::<PyObject>(py)?,
     };
 
     Ok(Py::new(py, op)?.into_any())
@@ -1118,7 +1101,7 @@ impl WriteToFsOperator {
         // 创建一个新的 "Observable-like" 对象，它包装 source 的订阅
         // 简化：返回一个 WriteToFsObservable 包装
         let obs = WriteToFsObservable {
-            source: Py::new(py, source.extract::<PyObject>(py)?)?,
+            source: source.extract::<PyObject>(py)?,
             mode: self.mode.clone(),
         };
         Ok(Py::new(py, obs)?.into_any())
@@ -1144,14 +1127,14 @@ impl WriteToFsObservable {
         // 我们使用一个 PyO3 包装可调用对象来处理这些
 
         let handler = WriteHandler {
-            downstream: Py::new(py, on_next)?,
+            downstream: on_next.clone_ref(py),
             mode: self.mode.clone(),
         };
         let handler_py = Py::new(py, handler)?.into_any();
 
         // 订阅源
         let source_ref = self.source.bind(py);
-        source_ref.call_method1("subscribe", (handler_py,))
+        Ok(source_ref.call_method1("subscribe", (handler_py,))?.unbind().into_any())
     }
 }
 
@@ -1189,7 +1172,7 @@ impl WriteHandler {
         }
 
         // 情况 2: dict
-        if let Ok(dict_ref) = item.extract::<&PyDict>(py) {
+        if let Ok(dict_ref) = item.bind(py).downcast::<PyDict>() {
             let path: String = dict_ref.get_item("path")?.map_or_else(|| Ok(String::new()), |v| v.extract())?;
             let content: String = dict_ref.get_item("content")?.map_or_else(|| Ok(String::new()), |v| v.extract()).unwrap_or_default();
             let ct: u32 = dict_ref.get_item("change_type")?.map_or_else(|| Ok(if self.mode == "create" { 0 } else { 1 }), |v| v.extract()).unwrap_or(0);
@@ -1220,12 +1203,12 @@ impl WriteHandler {
         }
 
         // 情况 3: tuple / list
-        if let Ok(tuple_ref) = item.extract::<&PyTuple>(py) {
+        if let Ok(tuple_ref) = item.bind(py).downcast::<PyTuple>() {
             if tuple_ref.len() >= 2 {
-                let path: String = tuple_ref.get_item(0).extract()?;
-                let content: String = tuple_ref.get_item(1).extract().unwrap_or_default();
+                let path: String = tuple_ref.get_item(0)?.extract()?;
+                let content: String = tuple_ref.get_item(1)?.extract().unwrap_or_default();
                 let ct: u32 = if tuple_ref.len() >= 3 {
-                    tuple_ref.get_item(2).extract().unwrap_or(if self.mode == "create" { 0 } else { 1 })
+                    tuple_ref.get_item(2)?.extract().unwrap_or(if self.mode == "create" { 0 } else { 1 })
                 } else {
                     if self.mode == "create" { 0 } else { 1 }
                 };
@@ -1256,12 +1239,12 @@ impl WriteHandler {
             }
         }
 
-        if let Ok(list_ref) = item.extract::<&PyList>(py) {
+        if let Ok(list_ref) = item.bind(py).downcast::<PyList>() {
             if list_ref.len() >= 2 {
-                let path: String = list_ref.get_item(0).extract()?;
-                let content: String = list_ref.get_item(1).extract().unwrap_or_default();
+                let path: String = list_ref.get_item(0)?.extract()?;
+                let content: String = list_ref.get_item(1)?.extract().unwrap_or_default();
                 let ct: u32 = if list_ref.len() >= 3 {
-                    list_ref.get_item(2).extract().unwrap_or(if self.mode == "create" { 0 } else { 1 })
+                    list_ref.get_item(2)?.extract().unwrap_or(if self.mode == "create" { 0 } else { 1 })
                 } else {
                     if self.mode == "create" { 0 } else { 1 }
                 };

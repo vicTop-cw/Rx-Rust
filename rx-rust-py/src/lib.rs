@@ -2,15 +2,15 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::sync::{Arc, Mutex};
 
-// mod file_watcher;
-// use file_watcher::*;
+mod file_watcher;
+use file_watcher::*;
 
-// mod folder_watcher;
-// use folder_watcher::*;
+mod folder_watcher;
+use folder_watcher::*;
 
-// pub mod clipboard;
+pub mod clipboard;
 
-// pub mod keyboard_mouse;
+pub mod keyboard_mouse;
 
 // ============================================================================
 // Subscription - 订阅句柄
@@ -597,6 +597,106 @@ impl Observable {
             })
         })
     }
+
+    // ========== 监控专用操作符 ==========
+
+    fn filter_by_event_type(&self, event_type: PyObject) -> Self {
+        let source_fn = self.subscribe_fn.clone();
+        Self::new_impl(move |downstream_observer| {
+            Python::with_gil(|py| {
+                let event_type_clone = event_type.clone_ref(py);
+                let downstream_clone = downstream_observer.clone_ref(py);
+                let wrapped = RustObserver::new(move |py, value| {
+                    if let Ok(event_type_val) = value.call_method0(py, "event_type") {
+                        let event_type_bound = event_type_clone.bind(py);
+                        let event_type_val_bound = event_type_val.bind(py);
+                        let eq: bool = event_type_val_bound.eq(event_type_bound).unwrap_or(false);
+                        if eq {
+                            let _ = downstream_clone.call1(py, (value,));
+                        }
+                    }
+                    Ok(())
+                });
+                source_fn(wrapped.to_object(py));
+                Py::new(py, Subscription::new()).unwrap()
+            })
+        })
+    }
+
+    #[pyo3(signature = (duration, get_key=None))]
+    fn throttle_events(&self, duration: f64, get_key: Option<PyObject>) -> Self {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        
+        let source_fn = self.subscribe_fn.clone();
+        let last_emit: Arc<Mutex<HashMap<usize, f64>>> = Arc::new(Mutex::new(HashMap::new()));
+        
+        Self::new_impl(move |downstream_observer| {
+            let last_emit_clone = last_emit.clone();
+            Python::with_gil(|py| {
+                let downstream_clone = downstream_observer.clone_ref(py);
+                
+                let wrapped = RustObserver::new(move |py, value| {
+                    let key = value.as_ptr() as usize;
+                    
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+                    
+                    let mut last_emit_map = last_emit_clone.lock().unwrap();
+                    let last = last_emit_map.get(&key).copied().unwrap_or(0.0);
+                    
+                    if now - last >= duration {
+                        last_emit_map.insert(key, now);
+                        let _ = downstream_clone.call1(py, (value,));
+                    }
+                    Ok(())
+                });
+                source_fn(wrapped.to_object(py));
+                Py::new(py, Subscription::new()).unwrap()
+            })
+        })
+    }
+
+    fn event_rate(&self, window_size: usize) -> Self {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        
+        let source_fn = self.subscribe_fn.clone();
+        let timestamps: Arc<Mutex<VecDeque<f64>>> = Arc::new(Mutex::new(VecDeque::with_capacity(window_size)));
+        
+        Self::new_impl(move |downstream_observer| {
+            let timestamps_clone = timestamps.clone();
+            Python::with_gil(|py| {
+                let downstream_clone = downstream_observer.clone_ref(py);
+                
+                let wrapped = RustObserver::new(move |py, _| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+                    
+                    let mut ts = timestamps_clone.lock().unwrap();
+                    ts.push_back(now);
+                    if ts.len() > window_size {
+                        ts.pop_front();
+                    }
+                    
+                    if ts.len() >= 2 {
+                        let elapsed = ts.back().unwrap() - ts.front().unwrap();
+                        if elapsed > 0.0 {
+                            let rate = (ts.len() - 1) as f64 / elapsed;
+                            let _ = downstream_clone.call1(py, (rate,));
+                        }
+                    }
+                    Ok(())
+                });
+                source_fn(wrapped.to_object(py));
+                Py::new(py, Subscription::new()).unwrap()
+            })
+        })
+    }
 }
 
 // ============================================================================
@@ -964,9 +1064,9 @@ fn rx_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThreadPoolScheduler>()?;
     m.add_class::<AsyncScheduler>()?;
     m.add_class::<ImmediateScheduler>()?;
-    // add_file_watcher_to_module(m)?;
-    // crate::clipboard::toplevel::register_clipboard_module(m)?;
-    // crate::keyboard_mouse::toplevel::register_keyboard_mouse_module(m)?;
-    // add_folder_watcher_to_module(m)?;
+    add_file_watcher_to_module(m)?;
+    crate::clipboard::toplevel::register_clipboard_module(m)?;
+    crate::keyboard_mouse::toplevel::register_keyboard_mouse_module(m)?;
+    add_folder_watcher_to_module(m)?;
     Ok(())
 }

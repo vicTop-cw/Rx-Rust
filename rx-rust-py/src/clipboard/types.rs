@@ -24,24 +24,18 @@ pub struct ClipChangeType {
     pub value: u8,
 }
 
+impl ClipChangeType {
+    pub const TEXT: Self = ClipChangeType { value: 0 };
+    pub const FILES: Self = ClipChangeType { value: 1 };
+    pub const IMAGE: Self = ClipChangeType { value: 2 };
+    pub const HTML: Self = ClipChangeType { value: 3 };
+    pub const RTF: Self = ClipChangeType { value: 4 };
+    pub const CLEAR: Self = ClipChangeType { value: 5 };
+    pub const OTHER: Self = ClipChangeType { value: 6 };
+}
+
 #[pymethods]
 impl ClipChangeType {
-    // --- 常量（静态只读属性）
-    #[classattr]
-    const TEXT: Self = ClipChangeType { value: 0 };
-    #[classattr]
-    const FILES: Self = ClipChangeType { value: 1 };
-    #[classattr]
-    const IMAGE: Self = ClipChangeType { value: 2 };
-    #[classattr]
-    const HTML: Self = ClipChangeType { value: 3 };
-    #[classattr]
-    const RTF: Self = ClipChangeType { value: 4 };
-    #[classattr]
-    const CLEAR: Self = ClipChangeType { value: 5 };
-    #[classattr]
-    const OTHER: Self = ClipChangeType { value: 6 };
-
     // --- 工厂
     #[staticmethod]
     fn from_value(v: i64) -> PyResult<Self> {
@@ -127,7 +121,7 @@ pub enum ClipContent {
 // =====================================================================
 
 #[pyclass(name = "ClipData")]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClipData {
     pub content: ClipContent,
     #[pyo3(get)]
@@ -180,7 +174,7 @@ impl ClipData {
             let tags = tags.unwrap_or_default();
             let metadata = match metadata {
                 Some(m) => m,
-                None => Py::new(py, PyDict::new_bound(py))?,
+                None => PyDict::new_bound(py).unbind(),
             };
             let ts = timestamp.unwrap_or_else(|| {
                 std::time::SystemTime::now()
@@ -302,10 +296,10 @@ impl ClipData {
                     None
                 }
             } else {
-                content_obj.as_ref().map(|v| v.unbind())
+                content_obj.as_ref().map(|v| v.clone().unbind())
             }
         } else {
-            content_obj.as_ref().map(|v| v.unbind())
+            content_obj.as_ref().map(|v| v.clone().unbind())
         };
 
         let files: Vec<String> = data
@@ -333,7 +327,7 @@ impl ClipData {
                     None
                 }
             })
-            .unwrap_or_else(|| Py::new(py, PyDict::new_bound(py)).unwrap());
+            .unwrap_or_else(|| PyDict::new_bound(py).unbind());
 
         let timestamp: f64 = data
             .get_item("timestamp")?

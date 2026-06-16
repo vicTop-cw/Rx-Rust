@@ -2995,6 +2995,186 @@ class _OpModule:
             on_drop=on_drop, drop_strategy=drop_strategy, **kwargs
         )
 
+    # ========== 监控专用操作符 ==========
+
+    @staticmethod
+    def filter_by_event_type(event_type, get_event_type=None):
+        """按事件类型过滤"""
+        def default_get_type(value):
+            return getattr(value, 'event_type', None)
+        getter = get_event_type or default_get_type
+        
+        def operator(obs):
+            if hasattr(obs, 'filter_by_event_type'):
+                return obs.filter_by_event_type(event_type)
+            return obs.filter(lambda v: getter(v) == event_type)
+        return operator
+
+    @staticmethod
+    def filter_event_types(event_types, get_event_type=None):
+        """按多个事件类型过滤"""
+        def default_get_type(value):
+            return getattr(value, 'event_type', None)
+        getter = get_event_type or default_get_type
+        
+        def operator(obs):
+            return obs.filter(lambda v: getter(v) in event_types)
+        return operator
+
+    @staticmethod
+    def debounce_events(due_time, get_key=None):
+        """事件防抖 - 针对监控事件优化"""
+        def default_get_key(value):
+            return getattr(value, 'key_code', getattr(value, 'event_type', id(value)))
+        key_fn = get_key or default_get_key
+        
+        def operator(obs):
+            timers = {}
+            
+            def on_next(value, observer):
+                key = key_fn(value)
+                now = _time.time()
+                timers[key] = now
+                
+                def check_and_emit():
+                    if timers.get(key) == now:
+                        del timers[key]
+                        observer.on_next(value)
+                
+                timer = _threading.Timer(due_time, check_and_emit)
+                timer.start()
+            
+            return _OpModule._tap(obs, on_next=on_next)
+        return operator
+
+    @staticmethod
+    def throttle_events(duration, get_key=None):
+        """事件节流 - 在指定时间窗口内只发射第一个事件"""
+        def default_get_key(value):
+            return getattr(value, 'key_code', getattr(value, 'event_type', id(value)))
+        key_fn = get_key or default_get_key
+        
+        def operator(obs):
+            if hasattr(obs, 'throttle_events'):
+                return obs.throttle_events(duration)
+            
+            last_emit = {}
+            
+            def on_next(value, observer):
+                key = key_fn(value)
+                now = _time.time()
+                last = last_emit.get(key, 0)
+                
+                if now - last >= duration:
+                    last_emit[key] = now
+                    observer.on_next(value)
+            
+            return _OpModule._tap(obs, on_next=on_next)
+        return operator
+
+    @staticmethod
+    def buffer_events(count=None, time_window=None):
+        """事件缓冲 - 按数量或时间窗口聚合事件"""
+        def operator(obs):
+            buffer = []
+            window_start = None
+            timer = None
+            
+            def flush(observer):
+                nonlocal buffer, window_start, timer
+                if buffer:
+                    observer.on_next(list(buffer))
+                    buffer = []
+                window_start = None
+                timer = None
+            
+            def on_next(value, observer):
+                nonlocal buffer, window_start, timer
+                
+                if window_start is None:
+                    window_start = _time.time()
+                
+                buffer.append(value)
+                
+                if count is not None and len(buffer) >= count:
+                    flush(observer)
+                    return
+                
+                if time_window is not None and timer is None:
+                    timer = _threading.Timer(time_window, lambda: flush(observer))
+                    timer.start()
+            
+            obs = _OpModule._tap(obs, on_next=on_next)
+            return obs.do_on_completed(lambda: flush(None) if timer else None)
+        return operator
+
+    @staticmethod
+    def group_consecutive(key_fn, max_gap=0.5):
+        """按连续相同键分组 - 用于处理连续按键等"""
+        def operator(obs):
+            current_group = []
+            current_key = None
+            last_time = 0
+            
+            def emit_group(observer):
+                nonlocal current_group, current_key
+                if current_group:
+                    observer.on_next(list(current_group))
+                current_group = []
+                current_key = None
+            
+            def on_next(value, observer):
+                nonlocal current_group, current_key, last_time
+                
+                now = _time.time()
+                key = key_fn(value)
+                
+                if current_key is None:
+                    current_key = key
+                elif key != current_key or (now - last_time) > max_gap:
+                    emit_group(observer)
+                    current_key = key
+                
+                current_group.append(value)
+                last_time = now
+            
+            return obs.tap(on_next=on_next).do_on_completed(lambda: emit_group(None))
+        return operator
+
+    @staticmethod
+    def event_rate(window_size=10):
+        """计算事件频率（每秒事件数）"""
+        def operator(obs):
+            timestamps = _collections.deque(maxlen=window_size)
+            
+            def on_next(value, observer):
+                now = _time.time()
+                timestamps.append(now)
+                
+                if len(timestamps) >= 2:
+                    elapsed = timestamps[-1] - timestamps[0]
+                    if elapsed > 0:
+                        rate = (len(timestamps) - 1) / elapsed
+                        observer.on_next(rate)
+            
+            return obs.tap(on_next=on_next)
+        return operator
+
+    @staticmethod
+    def take_until_stopped(lifecycle):
+        """在生命周期停止时停止订阅"""
+        def operator(obs):
+            stopped = [False]
+            
+            def on_lifecycle(started):
+                if not started:
+                    stopped[0] = True
+            
+            lifecycle.subscribe(on_next=on_lifecycle)
+            
+            return obs.filter(lambda _: not stopped[0])
+        return operator
+
     @staticmethod
     def write_to_clipboard(dispatcher, source=None):
         """响应式操作符：把上游每一项写回剪贴板，并继续下发 ClipData。"""
@@ -3018,6 +3198,32 @@ class _OpModule:
             raise RuntimeError("write_to_foldersystem is only supported on Windows")
         from .folder_watcher import write_to_foldersystem as _wtfs2
         return _wtfs2(dispatcher, mode=mode)
+
+    @staticmethod
+    def _tap(obs, on_next=None, on_error=None, on_completed=None):
+        """内部辅助方法 - 实现 tap 功能"""
+        def subscribe(observer):
+            def _on_next(value):
+                if on_next:
+                    on_next(value, observer)
+                else:
+                    observer.on_next(value)
+            
+            def _on_error(err):
+                if on_error:
+                    on_error(err, observer)
+                else:
+                    observer.on_error(err)
+            
+            def _on_completed():
+                if on_completed:
+                    on_completed(observer)
+                else:
+                    observer.on_completed()
+            
+            return obs.subscribe(_on_next, _on_error, _on_completed)
+        
+        return Observable(subscribe)
 
 
 ops = _OpModule()

@@ -320,7 +320,7 @@ impl KeyData {
 
     #[staticmethod]
     #[pyo3(signature = (key_code, is_press, modifiers=None, window_title=None))]
-    fn now(
+    pub fn now(
         key_code: u32,
         is_press: bool,
         modifiers: Option<i32>,
@@ -520,7 +520,7 @@ impl MouseData {
 
     #[staticmethod]
     #[pyo3(signature = (x, y, event_type, button=None, delta=0))]
-    fn now(x: i32, y: i32, event_type: u8, button: Option<String>, delta: i32) -> Self {
+    pub fn now(x: i32, y: i32, event_type: u8, button: Option<String>, delta: i32) -> Self {
         let button = button.unwrap_or_else(|| "left".to_string());
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)

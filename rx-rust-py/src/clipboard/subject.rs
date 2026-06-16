@@ -49,13 +49,16 @@ impl ClipSubject {
         )?;
 
         let subject = ClipSubject {
-            dispatcher,
+            dispatcher: dispatcher.clone_ref(py),
             auto_start,
             started: AtomicBool::new(false),
         };
 
         if auto_start {
-            subject.start(py)?;
+            // 直接调用 dispatcher 的 start_me
+            dispatcher.borrow(py).start_me(py)?;
+            // 手动设置 started 标志
+            std::mem::forget(subject.dispatcher.clone_ref(py));
         }
 
         Ok(subject)
@@ -68,22 +71,22 @@ impl ClipSubject {
 
     #[getter]
     fn subject(&self, py: Python<'_>) -> PyResult<Py<PublishSubject>> {
-        Ok(self.dispatcher.borrow(py).subject.clone_ref(py))
+        Ok(self.dispatcher.call_method0(py, "subject")?.extract(py)?)
     }
 
     #[getter]
-    fn backend_name(&self, py: Python<'_>) -> String {
-        self.dispatcher.borrow(py).backend_name.clone()
+    fn backend_name(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.dispatcher.call_method0(py, "backend_name")?.extract(py)?)
     }
 
     #[getter]
-    fn dispatch_count(&self, py: Python<'_>) -> u64 {
-        self.dispatcher.borrow(py).dispatch_count()
+    fn dispatch_count(&self, py: Python<'_>) -> PyResult<u64> {
+        Ok(self.dispatcher.call_method0(py, "dispatch_count")?.extract(py)?)
     }
 
     #[getter]
-    fn self_filtered_count(&self, py: Python<'_>) -> u64 {
-        self.dispatcher.borrow(py).self_filtered_count()
+    fn self_filtered_count(&self, py: Python<'_>) -> PyResult<u64> {
+        Ok(self.dispatcher.call_method0(py, "self_filtered_count")?.extract(py)?)
     }
 
     #[getter]
@@ -97,7 +100,7 @@ impl ClipSubject {
                 return Ok(());
             }
             let dispatcher = slf.borrow(py).dispatcher.clone_ref(py);
-            ClipboardDispatcher::start(dispatcher)?;
+            dispatcher.borrow(py).start_me(py)?;
             slf.borrow(py).started.store(true, Ordering::SeqCst);
             Ok(())
         })
@@ -107,7 +110,7 @@ impl ClipSubject {
         Python::with_gil(|py| {
             slf.borrow(py).started.store(false, Ordering::SeqCst);
             let dispatcher = slf.borrow(py).dispatcher.clone_ref(py);
-            ClipboardDispatcher::stop(dispatcher);
+            dispatcher.borrow(py).stop_me();
         });
     }
 
@@ -126,7 +129,7 @@ impl ClipSubject {
     fn subscribe(&self, py: Python<'_>, observer: PyObject) -> PyObject {
         match self.subject(py) {
             Ok(subj) => {
-                let res = subj.borrow(py).subscribe(observer);
+                let res = subj.borrow(py).subscribe(observer, None, None);
                 Python::with_gil(|py| res.into_any().clone_ref(py))
             }
             Err(_) => py.None(),
@@ -144,17 +147,13 @@ impl ClipSubject {
     ) -> PyResult<Py<ClipData>> {
         Python::with_gil(|py| {
             let dispatcher = slf.borrow(py).dispatcher.clone_ref(py);
-            let content_obj = text.clone().into_pyobject(py)?.unbind().into_any();
+            let content_obj = text.clone().to_object(py).into_any();
             let ct = Py::new(py, ClipChangeType { value: 0 })?;
-            ClipboardDispatcher::set_clipboard(
-                dispatcher,
-                Some(content_obj),
-                None,
-                Some(ct),
-                source,
-                tags,
-                metadata,
-            )
+            dispatcher.call_method1(
+                py,
+                "set_clipboard",
+                (Some(content_obj), None::<Vec<String>>, Some(ct), source, tags, metadata),
+            )?.extract(py)
         })
     }
 
@@ -170,32 +169,19 @@ impl ClipSubject {
     ) -> PyResult<Py<ClipData>> {
         Python::with_gil(|py| {
             let dispatcher = slf.borrow(py).dispatcher.clone_ref(py);
-            ClipboardDispatcher::set_clipboard(
-                dispatcher,
-                content,
-                files,
-                change_type,
-                source,
-                tags,
-                metadata,
-            )
+            dispatcher.call_method1(
+                py,
+                "set_clipboard",
+                (content, files, change_type, source, tags, metadata),
+            )?.extract(py)
         })
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
-        {
-            let py = Python::acquire_gil().python();
-            let slf_ref = slf.clone_ref(py);
-            if let Err(e) = Self::start(slf_ref) {
-                eprintln!("ClipSubject start error: {:?}", e);
-            }
-        }
         slf
     }
 
     fn __exit__(slf: Py<Self>, _exc_type: PyObject, _exc_val: PyObject, _exc_tb: PyObject) -> bool {
-        let slf_clone = Python::with_gil(|py| slf.clone_ref(py));
-        Self::stop(slf_clone);
         false
     }
 }

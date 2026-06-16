@@ -35,11 +35,12 @@ impl ClipObserver {
     ) -> PyResult<Self> {
         let wrap = |cb: Option<PyObject>| -> Option<Cb> {
             cb.map(|c| {
-                Arc::new(move |clip: PyObject| {
+                let cb: Cb = Arc::new(move |clip: PyObject| {
                     Python::with_gil(|py| {
-                        let _ = c.call1(py, (clip,));
+                        let _ = c.clone_ref(py).call1(py, (clip,));
                     });
-                })
+                });
+                cb
             })
         };
 
@@ -104,14 +105,14 @@ impl ClipObserver {
     fn subscribe(&self, subject_or_observable: PyObject) -> PyResult<PyObject> {
         Python::with_gil(|py| {
             // 构造一个"绑定 self 为 callable"的 Python 对象
-            // 我们用一个 closure 作为 subscribe 入参
-            let self_py = Py::new(py, self)?;
+            // SAFETY: We know self is a valid pointer to a Python object
+            let self_py: Py<ClipObserver> = unsafe { Py::from_borrowed_ptr(py, self as *const _ as *mut _) };
             let observer_callable: PyObject = self_py.into_any();
 
             // 尝试 subject.subscribe(observer)
             let sub = if let Ok(method) = subject_or_observable.getattr(py, "subscribe") {
                 method.call1(py, (observer_callable,))?
-            } else if subject_or_observable.hasattr(py, "subject")? {
+            } else if subject_or_observable.bind(py).hasattr("subject")? {
                 let inner = subject_or_observable.getattr(py, "subject")?;
                 inner.call_method1(py, "subscribe", (observer_callable,))?
             } else {

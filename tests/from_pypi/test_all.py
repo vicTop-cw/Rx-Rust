@@ -19,6 +19,7 @@ try:
 except ModuleNotFoundError:
     _HERE = Path(__file__).resolve().parent
     _CANDIDATES = [
+        _HERE.parent.parent / "rx-rust-py" / "python",
         _HERE.parent / "rx-rust-py" / "python",
         _HERE.parent / "rxpy" / "python",
         _HERE.parent / "rx-rust-python",

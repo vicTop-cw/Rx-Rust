@@ -1,6 +1,7 @@
 """测试 rx-rust 剪贴板响应式模块。"""
 import sys
-sys.path.insert(0, r'rx-rust-py/python')
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rx-rust-py", "python"))
 
 import rx_rust
 from rx_rust import (
@@ -75,7 +76,6 @@ with ClipboardDispatcher(backend="polling", interval=0.5) as d:
     assert d.is_running, "Dispatcher 应处于 running 状态"
     print(f"  backend: {d.backend_name}")
     print(f"  is_running: {d.is_running}")
-    # 不主动触发 hook，仅验证生命周期无异常
 print(f"  after with: is_running = {d.is_running}")
 print("[PASS] ClipboardDispatcher 生命周期正确")
 
@@ -94,7 +94,6 @@ assert clip.change_type == ChangeType.TEXT
 assert "_source" in clip.metadata
 print(f"  set_clipboard returned: {clip}")
 print(f"  dispatch_count: {d.dispatch_count}")
-# 自己写回的应该被自过滤，所以不会重复触发
 print(f"  self_filtered_count: {d.self_filtered_count}")
 assert d.dispatch_count >= 1, "至少分发一次（来自 set_clipboard）"
 d.stop()
@@ -132,7 +131,6 @@ obs = ClipObserver(
 obs.subscribe(d.subject)
 d.start()
 
-# 手动触发文本事件
 d.set_clipboard(content="test text for observer", source="test")
 assert len(any_items) >= 1, "on_any 应该被触发"
 print(f"  text_items: {len(text_items)}, any_items: {len(any_items)}")
@@ -147,7 +145,6 @@ print("=" * 60)
 d = ClipboardDispatcher(backend="polling", interval=0.5)
 downstream = []
 
-# 通过 Observable 管道处理
 source_obs = Observable.from_iter(["alpha", "beta"])
 result_obs = write_to_clipboard(d, source="test-operator")(source_obs)
 result_obs.subscribe(on_next=lambda cd: downstream.append(cd))
@@ -186,7 +183,6 @@ obs, d = from_clipboard(interval=0.2, auto_start=True)
 assert obs is not None
 assert isinstance(d, ClipboardDispatcher)
 assert d.is_running
-# 订阅一下，不阻塞
 sub = obs.subscribe(on_next=lambda cd: print(f"    [from_clipboard] {cd}"))
 print(f"  from_clipboard: OK (obs={type(obs).__name__}, is_running={d.is_running})")
 d.stop()
@@ -199,7 +195,6 @@ print("=" * 60)
 d = ClipboardDispatcher(backend="polling", interval=0.3, filter_self=False)
 d.start()
 import time
-# 手动调用两次 _dispatch_once
 time.sleep(0.3)
 initial_dup = d.duplicate_count
 print(f"  initial duplicate_count: {initial_dup}")
@@ -212,11 +207,9 @@ print("Test 12: change_types 白名单过滤")
 print("=" * 60)
 d = ClipboardDispatcher(
     backend="polling", interval=0.3,
-    change_types={ChangeType.FILES},  # 仅接收 FILES
+    change_types={ChangeType.FILES},
 )
 d.start()
-# 写入 TEXT 类型，由于白名单是 FILES，hook 路径会过滤 TEXT
-# 但 set_clipboard 直接分发，所以依然会收到
 clip = d.set_clipboard(content="text-in-whitelist-test", source="test")
 assert clip.change_type == ChangeType.TEXT
 d.stop()
@@ -229,7 +222,6 @@ print("=" * 60)
 d = ClipboardDispatcher(backend="polling", interval=0.3)
 results = []
 
-# 测试 dict 上游
 source = Observable.from_iter([
     {"content": "from-dict", "tags": ["dict-tag"]},
     ("from-tuple", None, None, ["tuple-tag"], {}),

@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 
 use crate::keyboard_mouse::types::{KeyData, MouseData, MouseEventType};
 
-type Cb = Arc<dyn Fn(PyObject) + Send + Sync>;
+type Cb = Arc<dyn Fn(PyObject) + Send + Sync + 'static>;
 
 // ============================================================================
 // KeyObserver - 键盘事件观察者
@@ -43,11 +43,12 @@ impl KeyObserver {
     ) -> PyResult<Self> {
         let wrap = |cb: Option<PyObject>| -> Option<Cb> {
             cb.map(|c| {
-                Arc::new(move |data: PyObject| {
+                let cb_inner: Cb = Arc::new(move |data: PyObject| {
                     Python::with_gil(|py| {
                         let _ = c.call1(py, (data,));
                     });
-                })
+                });
+                cb_inner
             })
         };
 
@@ -67,42 +68,39 @@ impl KeyObserver {
 
     /// 事件入口：根据 is_press 路由到对应回调
     fn __call__(&self, fd: Py<KeyData>, py: Python<'_>) -> PyResult<()> {
-        Python::with_gil(|py| {
-            let is_press = fd.borrow(py).is_press;
-            let cbs = self.callbacks.lock().unwrap();
+        let is_press = fd.borrow(py).is_press;
+        let cbs = self.callbacks.lock().unwrap();
 
-            // 根据 is_press 路由
-            if is_press {
-                if let Some(cb) = &cbs.on_press {
-                    cb(fd.clone_ref(py));
-                }
-            } else {
-                if let Some(cb) = &cbs.on_release {
-                    cb(fd.clone_ref(py));
-                }
+        if is_press {
+            if let Some(cb) = &cbs.on_press {
+                cb(fd.clone_ref(py).into_any());
             }
+        } else {
+            if let Some(cb) = &cbs.on_release {
+                cb(fd.clone_ref(py).into_any());
+            }
+        }
 
-            // on_any 始终调用
-            if let Some(cb) = &cbs.on_any {
-                cb(fd);
-            }
-        });
+        if let Some(cb) = &cbs.on_any {
+            cb(fd.clone_ref(py).into_any());
+        }
         Ok(())
     }
 
     /// 订阅主题（通常是 KeyboardDispatcher 或类似对象）
     fn subscribe(&self, subject: PyObject, py: Python<'_>) -> PyResult<PyObject> {
-        let self_py = Py::new(py, self)?;
+        let self_py = Py::new(py, Self {
+            callbacks: self.callbacks.clone(),
+            subscription: Arc::new(StdMutex::new(None)),
+        })?;
         let wrapper = KeyObserverWrapper {
-            inner: self_py.clone(),
+            inner: self_py.clone_ref(py),
         };
         let wrapper_py = Py::new(py, wrapper)?.into_any();
 
-        // 获取 on_error 和 on_completed 回调
         let on_error_cb = self.callbacks.lock().unwrap().on_error.clone();
         let on_completed_cb = self.callbacks.lock().unwrap().on_completed.clone();
 
-        // 创建 on_error wrapper
         let on_error_py = if let Some(cb) = on_error_cb {
             let cb_clone = cb.clone();
             Some(Py::new(py, KeyObserverErrorWrapper { inner: cb_clone })?.into_any())
@@ -110,7 +108,6 @@ impl KeyObserver {
             None
         };
 
-        // 创建 on_completed wrapper
         let on_completed_py = if let Some(cb) = on_completed_cb {
             let cb_clone = cb.clone();
             Some(Py::new(py, KeyObserverCompletedWrapper { inner: cb_clone })?.into_any())
@@ -118,32 +115,24 @@ impl KeyObserver {
             None
         };
 
-        // 调用 subject.subscribe(on_next, on_error, on_completed)
-        let args = if on_error_py.is_some() && on_completed_py.is_some() {
-            (wrapper_py, on_error_py.unwrap(), on_completed_py.unwrap())
+        let sub = if on_error_py.is_some() && on_completed_py.is_some() {
+            subject.call_method1(py, "subscribe", (wrapper_py.clone_ref(py), on_error_py.unwrap(), on_completed_py.unwrap()))?
         } else if on_error_py.is_some() {
-            (wrapper_py, on_error_py.unwrap())
+            subject.call_method1(py, "subscribe", (wrapper_py.clone_ref(py), on_error_py.unwrap()))?
         } else {
-            (wrapper_py,)
+            subject.call_method1(py, "subscribe", (wrapper_py,))?
         };
-        let sub = subject.call_method1(py, "subscribe", args)?;
         self.subscription.lock().unwrap().replace(sub.extract(py)?);
         Ok(sub)
     }
 
     /// 链式订阅：订阅后返回 self
-    fn attach<'py>(&self, subject: PyObject, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
+    fn attach(&self, subject: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         self.subscribe(subject, py)?;
-        // 返回 self 需要通过 PyRef
-        // 由于无法直接返回 PyRef，我们返回一个 clone 的方式
-        // 实际上这里需要重新考虑实现方式
-        Ok(PyRef::new(
-            py,
-            KeyObserver {
-                callbacks: self.callbacks.clone(),
-                subscription: self.subscription.clone(),
-            },
-        )?)
+        Ok(Py::new(py, Self {
+            callbacks: self.callbacks.clone(),
+            subscription: self.subscription.clone(),
+        })?.into_any())
     }
 
     /// 退订：释放订阅
@@ -178,7 +167,6 @@ impl KeyObserver {
     }
 }
 
-// 用于 subscribe 时包装 KeyObserver 的 Rust callable
 #[pyclass]
 struct KeyObserverWrapper {
     inner: Py<KeyObserver>,
@@ -187,11 +175,11 @@ struct KeyObserverWrapper {
 #[pymethods]
 impl KeyObserverWrapper {
     fn __call__(&self, fd: Py<KeyData>, py: Python<'_>) -> PyResult<()> {
-        self.inner.call__(fd, py)
+        let _ = self.inner.call_method1(py, "__call__", (fd,));
+        Ok(())
     }
 }
 
-// 用于包装 on_error 回调
 #[pyclass]
 struct KeyObserverErrorWrapper {
     inner: Cb,
@@ -200,12 +188,11 @@ struct KeyObserverErrorWrapper {
 #[pymethods]
 impl KeyObserverErrorWrapper {
     fn __call__(&self, err: PyObject) -> PyResult<()> {
-        self.inner(err);
+        (self.inner)(err);
         Ok(())
     }
 }
 
-// 用于包装 on_completed 回调
 #[pyclass]
 struct KeyObserverCompletedWrapper {
     inner: Cb,
@@ -214,9 +201,8 @@ struct KeyObserverCompletedWrapper {
 #[pymethods]
 impl KeyObserverCompletedWrapper {
     fn __call__(&self) -> PyResult<()> {
-        // on_completed 不需要参数，但我们传入 None
         Python::with_gil(|py| {
-            self.inner(py.None());
+            (self.inner)(py.None());
         });
         Ok(())
     }
@@ -246,9 +232,7 @@ struct MouseObserverCallbacks {
 pub struct MouseObserver {
     callbacks: Arc<StdMutex<MouseObserverCallbacks>>,
     subscription: Arc<StdMutex<Option<PyObject>>>,
-    // 点击检测状态：记录最近一次 LeftDown 的位置
     last_click_down: Arc<StdMutex<Option<(i32, i32)>>>,
-    // 拖拽检测状态
     is_dragging: Arc<StdMutex<bool>>,
     drag_start: Arc<StdMutex<Option<(i32, i32)>>>,
 }
@@ -274,11 +258,12 @@ impl MouseObserver {
     ) -> PyResult<Self> {
         let wrap = |cb: Option<PyObject>| -> Option<Cb> {
             cb.map(|c| {
-                Arc::new(move |data: PyObject| {
+                let cb_inner: Cb = Arc::new(move |data: PyObject| {
                     Python::with_gil(|py| {
                         let _ = c.call1(py, (data,));
                     });
-                })
+                });
+                cb_inner
             })
         };
 
@@ -307,94 +292,78 @@ impl MouseObserver {
 
     /// 事件入口：根据 event_type 路由到对应回调
     fn __call__(&self, md: Py<MouseData>, py: Python<'_>) -> PyResult<()> {
-        Python::with_gil(|py| {
-            let event_type = md.borrow(py).event_type;
-            let x = md.borrow(py).x;
-            let y = md.borrow(py).y;
-            let cbs = self.callbacks.lock().unwrap();
+        let event_type = md.borrow(py).event_type;
+        let x = md.borrow(py).x;
+        let y = md.borrow(py).y;
+        let cbs = self.callbacks.lock().unwrap();
 
-            match event_type {
-                0 => {
-                    // MOVE
-                    if let Some(cb) = &cbs.on_move {
-                        cb(md.clone_ref(py));
-                    }
+        match event_type {
+            0 => {
+                if let Some(cb) = &cbs.on_move {
+                    cb(md.clone_ref(py).into_any());
                 }
-                1 => {
-                    // LEFT_DOWN
-                    if let Some(cb) = &cbs.on_left_down {
-                        cb(md.clone_ref(py));
-                    }
-                    // 记录点击位置用于 click 检测
-                    *self.last_click_down.lock().unwrap() = Some((x, y));
-                    // 开始拖拽
-                    *self.is_dragging.lock().unwrap() = true;
-                    *self.drag_start.lock().unwrap() = Some((x, y));
+            }
+            1 => {
+                if let Some(cb) = &cbs.on_left_down {
+                    cb(md.clone_ref(py).into_any());
                 }
-                2 => {
-                    // LEFT_UP
-                    if let Some(cb) = &cbs.on_left_up {
-                        cb(md.clone_ref(py));
-                    }
-                    // click 检测：检查是否在原位置（±2 像素）
-                    if let Some((sx, sy)) = self.last_click_down.lock().unwrap().take() {
-                        if (x - sx).abs() <= 2 && (y - sy).abs() <= 2 {
-                            if let Some(cb) = &cbs.on_click {
-                                cb(md.clone_ref(py));
-                            }
+                *self.last_click_down.lock().unwrap() = Some((x, y));
+                *self.is_dragging.lock().unwrap() = true;
+                *self.drag_start.lock().unwrap() = Some((x, y));
+            }
+            2 => {
+                if let Some(cb) = &cbs.on_left_up {
+                    cb(md.clone_ref(py).into_any());
+                }
+                if let Some((sx, sy)) = self.last_click_down.lock().unwrap().take() {
+                    if (x - sx).abs() <= 2 && (y - sy).abs() <= 2 {
+                        if let Some(cb) = &cbs.on_click {
+                            cb(md.clone_ref(py).into_any());
                         }
                     }
-                    // 结束拖拽
-                    *self.is_dragging.lock().unwrap() = false;
                 }
-                3 => {
-                    // RIGHT_DOWN
-                    if let Some(cb) = &cbs.on_right_down {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                4 => {
-                    // RIGHT_UP
-                    if let Some(cb) = &cbs.on_right_up {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                5 => {
-                    // MIDDLE_DOWN
-                    if let Some(cb) = &cbs.on_middle_down {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                6 => {
-                    // MIDDLE_UP
-                    if let Some(cb) = &cbs.on_middle_up {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                7 => {
-                    // SCROLL
-                    if let Some(cb) = &cbs.on_scroll {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                8 => {
-                    // DRAG
-                    if let Some(cb) = &cbs.on_drag {
-                        cb(md.clone_ref(py));
-                    }
-                }
-                _ => {}
+                *self.is_dragging.lock().unwrap() = false;
             }
+            3 => {
+                if let Some(cb) = &cbs.on_right_down {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            4 => {
+                if let Some(cb) = &cbs.on_right_up {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            5 => {
+                if let Some(cb) = &cbs.on_middle_down {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            6 => {
+                if let Some(cb) = &cbs.on_middle_up {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            7 => {
+                if let Some(cb) = &cbs.on_scroll {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            8 => {
+                if let Some(cb) = &cbs.on_drag {
+                    cb(md.clone_ref(py).into_any());
+                }
+            }
+            _ => {}
+        }
 
-            // on_any 始终调用
-            if let Some(cb) = &cbs.on_any {
-                cb(md);
-            }
-        });
+        if let Some(cb) = &cbs.on_any {
+            cb(md.clone_ref(py).into_any());
+        }
         Ok(())
     }
 
-    /// 内部处理拖拽事件的回调（由外部系统调用）
+    /// 内部处理拖拽事件的回调
     fn _handle_drag_move(&self, md: Py<MouseData>, py: Python<'_>) -> PyResult<()> {
         let is_dragging = *self.is_dragging.lock().unwrap();
         if !is_dragging {
@@ -405,14 +374,11 @@ impl MouseObserver {
         let y = md.borrow(py).y;
 
         if let Some((sx, sy)) = self.drag_start.lock().unwrap().take() {
-            Python::with_gil(|py| {
-                let cbs = self.callbacks.lock().unwrap();
-                if let Some(cb) = &cbs.on_drag {
-                    // 构造拖拽信息
-                    let drag_info = (sx, sy, x, y);
-                    let _ = cb(drag_info.into_pyobject(py).unwrap().unbind());
-                }
-            });
+            let cbs = self.callbacks.lock().unwrap();
+            if let Some(cb) = &cbs.on_drag {
+                let drag_info = (sx, sy, x, y);
+                let _ = cb(drag_info.to_object(py).into_any());
+            }
         }
         *self.drag_start.lock().unwrap() = Some((x, y));
         Ok(())
@@ -420,17 +386,21 @@ impl MouseObserver {
 
     /// 订阅主题
     fn subscribe(&self, subject: PyObject, py: Python<'_>) -> PyResult<PyObject> {
-        let self_py = Py::new(py, self)?;
+        let self_py = Py::new(py, Self {
+            callbacks: self.callbacks.clone(),
+            subscription: Arc::new(StdMutex::new(None)),
+            last_click_down: self.last_click_down.clone(),
+            is_dragging: self.is_dragging.clone(),
+            drag_start: self.drag_start.clone(),
+        })?;
         let wrapper = MouseObserverWrapper {
-            inner: self_py.clone(),
+            inner: self_py.clone_ref(py),
         };
         let wrapper_py = Py::new(py, wrapper)?.into_any();
 
-        // 获取 on_error 和 on_completed 回调
         let on_error_cb = self.callbacks.lock().unwrap().on_error.clone();
         let on_completed_cb = self.callbacks.lock().unwrap().on_completed.clone();
 
-        // 创建 on_error wrapper
         let on_error_py = if let Some(cb) = on_error_cb {
             let cb_clone = cb.clone();
             Some(Py::new(py, MouseObserverErrorWrapper { inner: cb_clone })?.into_any())
@@ -438,7 +408,6 @@ impl MouseObserver {
             None
         };
 
-        // 创建 on_completed wrapper
         let on_completed_py = if let Some(cb) = on_completed_cb {
             let cb_clone = cb.clone();
             Some(Py::new(py, MouseObserverCompletedWrapper { inner: cb_clone })?.into_any())
@@ -446,32 +415,27 @@ impl MouseObserver {
             None
         };
 
-        // 调用 subject.subscribe(on_next, on_error, on_completed)
-        let args = if on_error_py.is_some() && on_completed_py.is_some() {
-            (wrapper_py, on_error_py.unwrap(), on_completed_py.unwrap())
+        let sub = if on_error_py.is_some() && on_completed_py.is_some() {
+            subject.call_method1(py, "subscribe", (wrapper_py.clone_ref(py), on_error_py.unwrap(), on_completed_py.unwrap()))?
         } else if on_error_py.is_some() {
-            (wrapper_py, on_error_py.unwrap())
+            subject.call_method1(py, "subscribe", (wrapper_py.clone_ref(py), on_error_py.unwrap()))?
         } else {
-            (wrapper_py,)
+            subject.call_method1(py, "subscribe", (wrapper_py,))?
         };
-        let sub = subject.call_method1(py, "subscribe", args)?;
         self.subscription.lock().unwrap().replace(sub.extract(py)?);
         Ok(sub)
     }
 
     /// 链式订阅：订阅后返回 self
-    fn attach<'py>(&self, subject: PyObject, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
+    fn attach(&self, subject: PyObject, py: Python<'_>) -> PyResult<PyObject> {
         self.subscribe(subject, py)?;
-        Ok(PyRef::new(
-            py,
-            MouseObserver {
-                callbacks: self.callbacks.clone(),
-                subscription: self.subscription.clone(),
-                last_click_down: self.last_click_down.clone(),
-                is_dragging: self.is_dragging.clone(),
-                drag_start: self.drag_start.clone(),
-            },
-        )?)
+        Ok(Py::new(py, Self {
+            callbacks: self.callbacks.clone(),
+            subscription: self.subscription.clone(),
+            last_click_down: self.last_click_down.clone(),
+            is_dragging: self.is_dragging.clone(),
+            drag_start: self.drag_start.clone(),
+        })?.into_any())
     }
 
     /// 退订：释放订阅
@@ -509,7 +473,6 @@ impl MouseObserver {
     }
 }
 
-// 用于 subscribe 时包装 MouseObserver 的 Rust callable
 #[pyclass]
 struct MouseObserverWrapper {
     inner: Py<MouseObserver>,
@@ -518,11 +481,11 @@ struct MouseObserverWrapper {
 #[pymethods]
 impl MouseObserverWrapper {
     fn __call__(&self, md: Py<MouseData>, py: Python<'_>) -> PyResult<()> {
-        self.inner.call__(md, py)
+        let _ = self.inner.call_method1(py, "__call__", (md,));
+        Ok(())
     }
 }
 
-// 用于包装 on_error 回调
 #[pyclass]
 struct MouseObserverErrorWrapper {
     inner: Cb,
@@ -531,12 +494,11 @@ struct MouseObserverErrorWrapper {
 #[pymethods]
 impl MouseObserverErrorWrapper {
     fn __call__(&self, err: PyObject) -> PyResult<()> {
-        self.inner(err);
+        (self.inner)(err);
         Ok(())
     }
 }
 
-// 用于包装 on_completed 回调
 #[pyclass]
 struct MouseObserverCompletedWrapper {
     inner: Cb,
@@ -545,9 +507,8 @@ struct MouseObserverCompletedWrapper {
 #[pymethods]
 impl MouseObserverCompletedWrapper {
     fn __call__(&self) -> PyResult<()> {
-        // on_completed 不需要参数，但我们传入 None
         Python::with_gil(|py| {
-            self.inner(py.None());
+            (self.inner)(py.None());
         });
         Ok(())
     }
